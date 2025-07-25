@@ -1,0 +1,4 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import "react-confirm-alert/src/react-confirm-alert.css";
