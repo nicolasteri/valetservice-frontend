@@ -26,6 +26,8 @@ function CompanyLogin() {
 
       if (response.data.success && response.data.access_level === "COMPANY_ONLY") {
         setCompanyId(response.data.company_id);
+        localStorage.setItem("company_id", response.data.company_id);
+        localStorage.setItem("location_id", response.data.location_id);
         setStep(2);
       } else {
         showToast.error("Company code not valid.");
