@@ -32,7 +32,7 @@ function OperatorLogin() {
     // 🧪 DEBUG END
 
     try {
-      const response = await axios.post("http://api.italinks.com/valet/operator_login.php", {
+      const response = await axios.post("https://api.italinks.com/valet/operator_login.php", {
         location_code: locationCode,
         company_code: cleanCompanyCode,
       });

@@ -153,7 +153,7 @@ function Dashboard() {
 
   const checkPhoneNumber = async (phone) => {
     try {
-      const response = await axios.post("http://api.italinks.com/valet/check_phone.php", {
+      const response = await axios.post("https://api.italinks.com/valet/check_phone.php", {
         phone_number: phone,
         company_id: companyId,
       });
@@ -182,7 +182,7 @@ function Dashboard() {
       timeRange: "today"
     });
 
-    fetch("http://api.italinks.com/valet/get_customers.php", {
+    fetch("https://api.italinks.com/valet/get_customers.php", {
       method: "POST",
       headers: {"Content-Type": "application/json",},
             // DOPO – niente field “status” se siamo in CLEAR-filter
@@ -225,7 +225,7 @@ function Dashboard() {
       return;
     }
 
-    fetch("http://api.italinks.com/valet/update_overnight.php", {
+    fetch("https://api.italinks.com/valet/update_overnight.php", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -283,7 +283,7 @@ function Dashboard() {
   
       // 🔍 Controlla se il cliente esiste già per questa company
       const responseCheck = await axios.post(
-        "http://api.italinks.com/valet/check_phone.php",
+        "https://api.italinks.com/valet/check_phone.php",
         {
           phone_number: customerData.phone_number,
           company_id,
@@ -295,7 +295,7 @@ function Dashboard() {
         const customer_id = responseCheck.data.customer.customer_id;
   
         const responseAdd = await axios.post(
-          "http://api.italinks.com/valet/add_existing_customer.php",
+          "https://api.italinks.com/valet/add_existing_customer.php",
           {
             customer_id,
             tag_number: parseInt(customerData.tag_number),
@@ -320,7 +320,7 @@ function Dashboard() {
           location_id,
         };
   
-        const responseNew = await fetch("http://api.italinks.com/valet/add_customers.php", {
+        const responseNew = await fetch("https://api.italinks.com/valet/add_customers.php", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -355,7 +355,7 @@ function Dashboard() {
     setCheckingTag(true);
 
     try {
-      const response = await fetch("http://api.italinks.com/valet/check_tag.php", {
+      const response = await fetch("https://api.italinks.com/valet/check_tag.php", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -396,7 +396,7 @@ function Dashboard() {
     try {
       const location_id = locationId;
 
-      const response = await axios.post("http://api.italinks.com/valet/add_existing_customer.php", {
+      const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
         customer_id: existingCustomer.customer_id,
         tag_number: parseInt(customerData.tag_number),
         location_id,
@@ -419,7 +419,7 @@ function Dashboard() {
   
   const updateStatus = async (customer_id, status) => {
     try {
-      const response = await fetch("http://api.italinks.com/valet/update_customer_status.php", {
+      const response = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1012,7 +1012,7 @@ function Dashboard() {
                     className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 text-white"
                     onClick={() => setShowSettingsModal(false)}
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    <svg xmlns="https://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                       strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" strokeWidth="2">
                       <path d="M9 11l-4 4l4 4m-4 -4h11a4 4 0 0 0 0 -8h-1"></path>
                     </svg>
@@ -1046,7 +1046,7 @@ function Dashboard() {
             {/* Footer fisso con Back + Save + Logout */}
             <div className="p-4 border-t flex justify-center">
               <button className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 text-white" onClick={() => setSelectedSetting(null)}>
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                <svg xmlns="https://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                   strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" strokeWidth="2">
                   <path d="M9 11l-4 4l4 4m-4 -4h11a4 4 0 0 0 0 -8h-1"></path>
                 </svg>

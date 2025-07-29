@@ -30,7 +30,7 @@ function ManagerLogin() {
     const rawManagerCode = managerCodeFormatted.replace(/-/g, "");
 
     try {
-      const response = await axios.post("http://api.italinks.com/valet/verify_codes.php", {
+      const response = await axios.post("https://api.italinks.com/valet/verify_codes.php", {
         company_code: companyIdParam,
         manager_code: rawManagerCode,
       });
