@@ -20,7 +20,7 @@ function CompanyLogin() {
     const rawCompanyCode = companyCodeFormatted.replace(/-/g, "");
 
     try {
-      const response = await axios.post("http://localhost/valetservice/api/verify_codes.php", {
+      const response = await axios.post("http://api.italinks.com/valet/verify_codes.php", {
         company_code: rawCompanyCode,
       });
 

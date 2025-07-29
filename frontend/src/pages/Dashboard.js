@@ -153,7 +153,7 @@ function Dashboard() {
 
   const checkPhoneNumber = async (phone) => {
     try {
-      const response = await axios.post("http://localhost/valetservice/api/check_phone.php", {
+      const response = await axios.post("http://api.italinks.com/valet/check_phone.php", {
         phone_number: phone,
         company_id: companyId,
       });
@@ -182,7 +182,7 @@ function Dashboard() {
       timeRange: "today"
     });
 
-    fetch("http://localhost/valetservice/api/get_customers.php", {
+    fetch("http://api.italinks.com/valet/get_customers.php", {
       method: "POST",
       headers: {"Content-Type": "application/json",},
             // DOPO – niente field “status” se siamo in CLEAR-filter
@@ -225,7 +225,7 @@ function Dashboard() {
       return;
     }
 
-    fetch("http://localhost/valetservice/api/update_overnight.php", {
+    fetch("http://api.italinks.com/valet/update_overnight.php", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -283,7 +283,7 @@ function Dashboard() {
   
       // 🔍 Controlla se il cliente esiste già per questa company
       const responseCheck = await axios.post(
-        "http://localhost/valetservice/api/check_phone.php",
+        "http://api.italinks.com/valet/check_phone.php",
         {
           phone_number: customerData.phone_number,
           company_id,
@@ -295,7 +295,7 @@ function Dashboard() {
         const customer_id = responseCheck.data.customer.customer_id;
   
         const responseAdd = await axios.post(
-          "http://localhost/valetservice/api/add_existing_customer.php",
+          "http://api.italinks.com/valet/add_existing_customer.php",
           {
             customer_id,
             tag_number: parseInt(customerData.tag_number),
@@ -320,7 +320,7 @@ function Dashboard() {
           location_id,
         };
   
-        const responseNew = await fetch("http://localhost/valetservice/api/add_customers.php", {
+        const responseNew = await fetch("http://api.italinks.com/valet/add_customers.php", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -355,7 +355,7 @@ function Dashboard() {
     setCheckingTag(true);
 
     try {
-      const response = await fetch("http://localhost/valetservice/api/check_tag.php", {
+      const response = await fetch("http://api.italinks.com/valet/check_tag.php", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -396,7 +396,7 @@ function Dashboard() {
     try {
       const location_id = locationId;
 
-      const response = await axios.post("http://localhost/valetservice/api/add_existing_customer.php", {
+      const response = await axios.post("http://api.italinks.com/valet/add_existing_customer.php", {
         customer_id: existingCustomer.customer_id,
         tag_number: parseInt(customerData.tag_number),
         location_id,
@@ -419,7 +419,7 @@ function Dashboard() {
   
   const updateStatus = async (customer_id, status) => {
     try {
-      const response = await fetch("http://localhost/valetservice/api/update_customer_status.php", {
+      const response = await fetch("http://api.italinks.com/valet/update_customer_status.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
