@@ -1,4 +1,10 @@
 <?php
+//DEBUG 
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+header('Content-Type: application/json');
+//
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
@@ -29,6 +35,10 @@ if ((int)$now->format('H') < 5) {
     $cutoff->modify('-1 day');
 }
 $overnightCutoff = $cutoff->setTime(4, 59, 59)->format('Y-m-d H:i:s');
+
+// DEBUG: Mostra i parametri ricevuti
+echo json_encode(["status" => "ok", "test" => true]);
+exit;
 
 // Trova tutti i record aperti prima del cutoff per la location e company
 $sql = "SELECT r.record_id, r.customer_id

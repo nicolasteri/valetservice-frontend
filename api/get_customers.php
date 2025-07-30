@@ -1,4 +1,10 @@
 <?php
+// DEBUG
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+header('Content-Type: application/json');
+
 // ✅ Supporto CORS e Preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     header("Access-Control-Allow-Origin: *");
@@ -15,6 +21,10 @@ include __DIR__ . '/config.php';
 
 $data = json_decode(file_get_contents("php://input"), true);
 
+// DEBUG: Salva i dati ricevuti in un file per debugging
+file_put_contents(__DIR__ . "/debug_get_customers.txt", print_r($data, true), FILE_APPEND);
+
+
 $location_id = $data['location_id'] ?? null;
 $company_id = $data['company_id'] ?? null;
 $search = $data['search'] ?? "";
@@ -29,6 +39,11 @@ if (!$location_id || !$company_id) {
 date_default_timezone_set("America/Chicago");
 $startOfDay = new DateTime("today 05:00");
 $endOfDay = (clone $startOfDay)->modify('+1 day')->modify('-1 second');
+
+// DEBUG: Mostra i parametri ricevuti
+echo json_encode(["status" => "ok", "test" => true]);
+exit;
+
 
 $query = "
     SELECT 
