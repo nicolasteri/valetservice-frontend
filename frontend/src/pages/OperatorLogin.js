@@ -13,7 +13,9 @@ function OperatorLogin() {
 
   useEffect(() => {
     const storedCompanyId = localStorage.getItem("company_id");
-    if (!storedCompanyId) {
+    if (storedCompanyId) {
+      setCompanyId(parseInt(storedCompanyId));
+    } else {
       showToast.error("Missing company reference");
       navigate("/company-login");
     }

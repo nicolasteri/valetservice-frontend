@@ -9,7 +9,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-include __DIR__ . '/../config.php';
+include __DIR__ . '/config.php';
 
 $data = json_decode(file_get_contents("php://input"), true);
 

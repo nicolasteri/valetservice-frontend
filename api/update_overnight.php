@@ -9,7 +9,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-include __DIR__ . '/../config.php';
+include __DIR__ . '/config.php';
 date_default_timezone_set('America/Chicago');
 
 // Ricezione dati dal frontend

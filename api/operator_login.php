@@ -4,7 +4,7 @@ header("Content-Type: application/json");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Allow-Methods: POST");
 
-include __DIR__ . '/../config.php';
+include __DIR__ . '/config.php';
 
 $data = json_decode(file_get_contents("php://input"), true);
 $location_code = $data["location_code"] ?? '';
