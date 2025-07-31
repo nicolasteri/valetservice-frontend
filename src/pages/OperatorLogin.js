@@ -10,6 +10,7 @@ function OperatorLogin() {
   const companyCodeRaw = queryParams.get("company_code");
 
   const [locationCode, setLocationCode] = useState("");
+  const [companyId, setCompanyId] = useState(null);
 
   useEffect(() => {
     const storedCompanyId = localStorage.getItem("company_id");
