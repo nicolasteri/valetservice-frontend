@@ -36,6 +36,14 @@ function Dashboard() {
       tag_number: "",
     });
   };
+  const [currentTime, setCurrentTime] = useState(Date.now());
+
+    useEffect(() => {
+      const interval = setInterval(() => {
+        setCurrentTime(Date.now()); // Forza il re-render ogni minuto
+      }, 60000); // 60 secondi
+      return () => clearInterval(interval); // pulizia
+    }, []);
   const [companyId, setCompanyId] = useState(null);
   const [locationId, setLocationId] = useState(null);
   const [locationName, setLocationName] = useState("");
@@ -57,18 +65,20 @@ function Dashboard() {
   });
 
   const formatElapsedTime = (timestamp) => {
-    if (!timestamp) return "00:00";
+    if (!timestamp) return "00h 00m";
     const now = currentTime;
     const start = new Date(timestamp).getTime();
     const diff = Math.floor((now - start) / 1000); // in secondi
 
-    if (diff < 0) return "00:00";
+    // Evita timer negativi o sotto 1 minuto: mostra sempre almeno 00h 00m
+    const safeDiff = diff < 0 ? 0 : diff;
 
-    const hours = String(Math.floor(diff / 3600)).padStart(2, "0");
-    const minutes = String(Math.floor((diff % 3600) / 60)).padStart(2, "0");
+    const hours = String(Math.floor(safeDiff / 3600)).padStart(2, "0");
+    const minutes = String(Math.floor((safeDiff % 3600) / 60)).padStart(2, "0");
 
     return `${hours}h ${minutes}m`;
   };
+
 
   // Funzione per ordinare e timer status PENDING e CARE 
   const customSort = (customers) => {
@@ -139,17 +149,6 @@ function Dashboard() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
-
-
-  const [currentTime, setCurrentTime] = useState(Date.now());
-
-    useEffect(() => {
-      const interval = setInterval(() => {
-        setCurrentTime(Date.now()); // Forza il re-render ogni minuto
-      }, 60000); // 60 secondi
-      return () => clearInterval(interval); // pulizia
-    }, []);
-
 
   const checkPhoneNumber = async (phone) => {
     try {
@@ -503,17 +502,19 @@ function Dashboard() {
   };
 
   const getElapsedTime = (createdAt) => {
+    if (!createdAt) return "00h 00m";
+
     const now = currentTime;
     const created = new Date(createdAt).getTime();
-    const diff = now - created;
+    const diff = Math.floor((now - created) / 1000); // in secondi
 
-    const minutes = Math.floor(diff / (1000 * 60));
-    const hours = Math.floor(minutes / 60);
+    const safeDiff = diff < 0 ? 0 : diff;
 
-    if (hours > 0) return `${hours}h ${minutes % 60}m`;
-    return `${minutes}m`;
+    const hours = String(Math.floor(safeDiff / 3600)).padStart(2, "0");
+    const minutes = String(Math.floor((safeDiff % 3600) / 60)).padStart(2, "0");
+
+    return `${hours}h ${minutes}m`;
   };
-
 
   const todayCustomers = customers.filter(c => isToday(c.created_at));
   const inToday = todayCustomers.length;
@@ -657,17 +658,19 @@ function Dashboard() {
         >
           <div className="font-semibold">TAG #{customer.tag_number}</div>
 
-          {/* Tempo dall'ingresso */}
-          <div className="text-xs mt-1">{getElapsedTime(customer.created_at)}</div>
+          {/* 🕒 Tempo dall'ingresso */}
+          <div className="text-xs text-gray-300 mt-1">
+            🕒 Check-in: {getElapsedTime(customer.created_at)}
+          </div>
 
-          {/* ⏱ Timer da requested_at se status è PENDING o CARE */}
+          {/* ⏱ Tempo di attesa veicolo */}
           {(isPending || isCare) && customer.requested_at && (
             <div className="text-xs text-yellow-300 font-semibold mt-1">
-              ⏱ {formatElapsedTime(customer.requested_at)}
+              ⏱ Wait: {formatElapsedTime(customer.requested_at)}
             </div>
           )}
 
-          {/* Punto esclamativo se è pending */}
+          {/* ⚠️ Punto esclamativo se è pending */}
           {isPending && (
             <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
               !
