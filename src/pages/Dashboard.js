@@ -36,14 +36,23 @@ function Dashboard() {
       tag_number: "",
     });
   };
-  const [currentTime, setCurrentTime] = useState(Date.now());
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
 
-    useEffect(() => {
-      const interval = setInterval(() => {
-        setCurrentTime(Date.now()); // Forza il re-render ogni minuto
-      }, 60000); // 60 secondi
-      return () => clearInterval(interval); // pulizia
-    }, []);
+  useEffect(() => {
+    const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
+    return () => clearInterval(id);
+  }, []);
+
+  // --- TIME HELPERS ---
+  const parseMySQL = (ts, assumeUTC = false) => {
+    if (!ts || ts === '0000-00-00 00:00:00') return null;
+    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
+    const d = new Date(assumeUTC ? iso + 'Z' : iso);
+    return isNaN(d.getTime()) ? null : d;
+  };
+// DEBUG
+console.log("requested_at raw:", customer.requested_at, "parsed:", parseMySQL(customer.requested_at, false));
+
   const [companyId, setCompanyId] = useState(null);
   const [locationId, setLocationId] = useState(null);
   const [locationName, setLocationName] = useState("");
@@ -60,39 +69,55 @@ function Dashboard() {
     [...arr].sort((a, b) => {
       const pa = statusPriority[a.status] ?? 99;
       const pb = statusPriority[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;                       // gruppo per status
-      return new Date(a.touchedAt) - new Date(b.touchedAt); // FIFO interno al gruppo
-  });
+      if (pa !== pb) return pa - pb;
+
+      // Secondary: FIFO per timestamp rilevante
+      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
+      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
+
+      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+
+      return aNum - bNum;
+    });
+
 
   const formatElapsedTime = (timestamp) => {
-    if (!timestamp) return "00h 00m";
-    const now = currentTime;
-    const start = new Date(timestamp).getTime();
-    const diff = Math.floor((now - start) / 1000); // in secondi
+    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
 
-    // Evita timer negativi o sotto 1 minuto: mostra sempre almeno 00h 00m
-    const safeDiff = diff < 0 ? 0 : diff;
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
 
-    const hours = String(Math.floor(safeDiff / 3600)).padStart(2, "0");
-    const minutes = String(Math.floor((safeDiff % 3600) / 60)).padStart(2, "0");
-
-    return `${hours}h ${minutes}m`;
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
   };
+
 
 
   // Funzione per ordinare e timer status PENDING e CARE 
   const customSort = (customers) => {
+    const num = (ts) => {
+      const d = parseMySQL(ts, /* assumeUTC? */ false);
+      return d ? d.getTime() : Number.POSITIVE_INFINITY;
+    };
+
     const pending = customers
       .filter((c) => c.status === "PENDING")
-      .sort((a, b) => new Date(a.requested_at) - new Date(b.requested_at));
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
     const care = customers
       .filter((c) => c.status === "CARE")
-      .sort((a, b) => new Date(a.requested_at) - new Date(b.requested_at));
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
     const inside = customers
       .filter((c) => c.status === "IN")
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      .sort((a, b) => num(a.created_at) - num(b.created_at));
+
     return [...pending, ...care, ...inside];
   };
+
 
 
   // Blocco per login e controllo dati
@@ -502,19 +527,17 @@ function Dashboard() {
   };
 
   const getElapsedTime = (createdAt) => {
-    if (!createdAt) return "00h 00m";
+    const startDate = parseMySQL(createdAt, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
 
-    const now = currentTime;
-    const created = new Date(createdAt).getTime();
-    const diff = Math.floor((now - created) / 1000); // in secondi
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
 
-    const safeDiff = diff < 0 ? 0 : diff;
-
-    const hours = String(Math.floor(safeDiff / 3600)).padStart(2, "0");
-    const minutes = String(Math.floor((safeDiff % 3600) / 60)).padStart(2, "0");
-
-    return `${hours}h ${minutes}m`;
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
   };
+
 
   const todayCustomers = customers.filter(c => isToday(c.created_at));
   const inToday = todayCustomers.length;
