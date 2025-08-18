@@ -9,12 +9,12 @@ import { confirmAndUpdatePopup } from "../utils/ui/ConfirmPopup";
 import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
 
-const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
-const [isOnline, setIsOnline] = useState(() => (isBrowser ? navigator.onLine : true));
+  const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
+
 
 function Dashboard() {
   const navigate = useNavigate();
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isOnline, setIsOnline] = useState(() => (isBrowser ? navigator.onLine : true));
   const [dbConnected, setDbConnected] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -53,8 +53,6 @@ function Dashboard() {
     const d = new Date(assumeUTC ? iso + 'Z' : iso);
     return isNaN(d.getTime()) ? null : d;
   };
-// DEBUG
-console.log("requested_at raw:", customer.requested_at, "parsed:", parseMySQL(customer.requested_at, false));
 
   const [companyId, setCompanyId] = useState(null);
   const [locationId, setLocationId] = useState(null);
