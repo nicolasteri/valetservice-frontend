@@ -3,15 +3,18 @@ import { FaWifi, FaDatabase, FaCog, FaTimesCircle } from "react-icons/fa";
 import "react-toastify/dist/ReactToastify.css";
 import { showToast } from "../utils/ui/showToast";
 import axios from "axios";
-import ShiftTracker from "../components/shifttracker";
+// import ShiftTracker from "../components/shifttracker";
 import GoogleSheetShift from "../components/GoogleSheetShift";
-import WeeklyReportButtons from "../components/WeeklyReportButtons";
 import { confirmAndUpdatePopup } from "../utils/ui/ConfirmPopup";
 import "react-confirm-alert/src/react-confirm-alert.css";
+import { useNavigate } from "react-router-dom";
+
+  const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
 
 function Dashboard() {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const navigate = useNavigate();
+  const [isOnline, setIsOnline] = useState(() => (isBrowser ? navigator.onLine : true));
   const [dbConnected, setDbConnected] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -26,17 +29,160 @@ function Dashboard() {
     color: "",
     tag_number: "",
   });
+  const resetCustomerForm = () => {
+    setCustomerData({
+      first_name: "",
+      last_name: "",
+      phone_number: "",
+      vehicle_model: "",
+      color: "",
+      tag_number: "",
+    });
+  };
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
+    return () => clearInterval(id);
+  }, []);
+
+  // --- TIME HELPERS ---
+  const parseMySQL = (ts, assumeUTC = false) => {
+    if (!ts || ts === '0000-00-00 00:00:00') return null;
+    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
+    const d = new Date(assumeUTC ? iso + 'Z' : iso);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const [companyId, setCompanyId] = useState(null);
+  const [locationId, setLocationId] = useState(null);
+  const [locationName, setLocationName] = useState("");
   const [customers, setCustomers] = useState([]);
   const [existingCustomer, setExistingCustomer] = useState(null);
   const [showExistingModal, setShowExistingModal] = useState(false);
   const [highlightTag, setHighlightTag] = useState(false);
+  const [selectedSetting, setSelectedSetting] = useState(null);
+
+  // Ordine di visualizzazione: più basso = più in alto nella dashboard
+  const statusPriority = { PENDING: 0, CARE: 0, IN: 1 };   // più basso = più importante
+
+  const sortByPriority = (arr) =>
+    [...arr].sort((a, b) => {
+      const pa = statusPriority[a.status] ?? 99;
+      const pb = statusPriority[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+
+      // Secondary: FIFO per timestamp rilevante
+      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
+      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
+
+      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+
+      return aNum - bNum;
+    });
+
+
+  const formatElapsedTime = (timestamp) => {
+    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
+
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
+
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
+  };
+
+
+
+  // Funzione per ordinare e timer status PENDING e CARE 
+  const customSort = (customers) => {
+    const num = (ts) => {
+      const d = parseMySQL(ts, /* assumeUTC? */ false);
+      return d ? d.getTime() : Number.POSITIVE_INFINITY;
+    };
+
+    const pending = customers
+      .filter((c) => c.status === "PENDING")
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
+    const care = customers
+      .filter((c) => c.status === "CARE")
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
+    const inside = customers
+      .filter((c) => c.status === "IN")
+      .sort((a, b) => num(a.created_at) - num(b.created_at));
+
+    return [...pending, ...care, ...inside];
+  };
+
+
+
+  // Blocco per login e controllo dati
+  const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
+
+  useEffect(() => {
+    const companyIdRaw = localStorage.getItem("company_id");
+    const locationIdRaw = localStorage.getItem("location_id");
+    const storedLocationName = localStorage.getItem("location_name");
+
+    console.log("🚨 DASHBOARD localStorage check:");
+    console.log("company_id (raw):", companyIdRaw);
+    console.log("location_id (raw):", locationIdRaw);
+
+    const parsedCompanyId = parseInt(companyIdRaw, 10);
+    const parsedLocationId = parseInt(locationIdRaw, 10);
+
+    if (!companyIdRaw || !locationIdRaw || isNaN(parsedCompanyId) || isNaN(parsedLocationId)) {
+      showToast.error("Access denied. Please login.");
+      navigate("/company-login");
+      return;
+    }
+
+    // ✅ Set all at once
+    setCompanyId(parsedCompanyId);
+    setLocationId(parsedLocationId);
+    if (storedLocationName) setLocationName(storedLocationName);
+
+  }, [navigate]);
+
+  useEffect(() => {
+    if (
+      typeof companyId === "number" &&
+      typeof locationId === "number" &&
+      !isNaN(companyId) &&
+      !isNaN(locationId)
+    ) {
+      triggerOvernightUpdate();
+      fetchCustomers();
+      setIsLoading(false);
+    }
+  }, [companyId, locationId, filterStatus, searchQuery]);
+
+ 
+  const handleOnline = () => setIsOnline(true);
+  const handleOffline = () => setIsOnline(false);
+
+  useEffect(() => {
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   const checkPhoneNumber = async (phone) => {
     try {
-      const response = await axios.post("http://localhost/valetservice/api/check_phone.php", {
+      const response = await axios.post("https://api.italinks.com/valet/check_phone.php", {
         phone_number: phone,
+        company_id: companyId,
       });
-  
+
       if (response.data.success && response.data.exists) {
         setExistingCustomer(response.data.customer);
         setShowExistingModal(true);
@@ -46,31 +192,86 @@ function Dashboard() {
     }
   };
 
-  const [selectedSetting, setSelectedSetting] = useState(null);
-  
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
-    fetchCustomers();
-    return () => {
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
-    };
-  }, []);
-
   const fetchCustomers = () => {
-    fetch("http://localhost/valetservice/api/get_customers.php")
+    if (!locationId || !companyId) {
+      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
+      return;
+    }
+
+    // DEBUG
+    console.log("📤 Sending filters:", {
+      location_id: locationId,
+      company_id: companyId,
+      status: filterStatus,
+      search: searchQuery,
+      timeRange: "today"
+    });
+
+    fetch("https://api.italinks.com/valet/get_customers.php", {
+      method: "POST",
+      headers: {"Content-Type": "application/json",},
+            // DOPO – niente field “status” se siamo in CLEAR-filter
+      body: JSON.stringify({
+        location_id: locationId,
+        company_id: companyId,
+        ...(filterStatus !== "ALL" && { status: filterStatus }), // <-- solo se diverso da ALL
+        search: searchQuery,
+        timeRange: "today"
+      }),
+
+    })
       .then((res) => {
         setDbConnected(res.ok);
         return res.json();
       })
       .then((data) => {
-        if (data.customers) setCustomers(data.customers);
+        if (data.success && data.customers) {
+
+          const prepared = data.customers.map((c) => ({
+            ...c,
+            touchedAt: c.touchedAt || c.created_at,  // se il back-end lo manda ok; altrimenti fallback
+          }));
+
+          setCustomers(sortByPriority(prepared));    // 👈 set già ordinato
+        } else {
+          console.error("❌ Failed fetching customers:", data.error || data);
+        }
       })
-      .catch(() => setDbConnected(false));
+
+      .catch((err) => {
+        console.error("🔥 Fetch error:", err);
+        setDbConnected(false);
+      });
   };
+
+  const triggerOvernightUpdate = () => {
+    if (!companyId || !locationId) {
+      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
+      return;
+    }
+
+    fetch("https://api.italinks.com/valet/update_overnight.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ company_id: companyId, location_id: locationId }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.success) {
+          console.error("🔥 Overnight update error:", data.error);
+        } else {
+          console.log("🌙 Overnight updated:", data.count);
+        }
+      })
+      .catch((err) => {
+        console.error("❌ Overnight fetch failed", err);
+      });
+  };
+
+
+  
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -102,46 +303,52 @@ function Dashboard() {
     }
   
     try {
-      // Controlla se cliente esiste già in base al numero di telefono
+      const company_id = companyId;
+      const location_id = locationId;
+  
+      // 🔍 Controlla se il cliente esiste già per questa company
       const responseCheck = await axios.post(
-        "http://localhost/valetservice/api/check_phone.php",
-        { phone_number: customerData.phone_number }
+        "https://api.italinks.com/valet/check_phone.php",
+        {
+          phone_number: customerData.phone_number,
+          company_id,
+        }
       );
   
       if (responseCheck.data.success && responseCheck.data.exists) {
-        // Cliente esistente: usa add_existing_customer.php direttamente
+        // ✅ Cliente già registrato: crea solo record e aggiorna tag
         const customer_id = responseCheck.data.customer.customer_id;
   
         const responseAdd = await axios.post(
-          "http://localhost/valetservice/api/add_existing_customer.php",
+          "https://api.italinks.com/valet/add_existing_customer.php",
           {
             customer_id,
             tag_number: parseInt(customerData.tag_number),
+            location_id,
           }
         );
   
         if (responseAdd.data.success) {
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
-          setCustomerData({
-            first_name: "",
-            last_name: "",
-            phone_number: "",
-            vehicle_model: "",
-            color: "",
-            tag_number: "",
-          });
+          resetCustomerForm();
           fetchCustomers();
         } else {
           showToast.error("Error: " + responseAdd.data.error);
         }
   
       } else {
-        // Cliente nuovo: crea nuovo customer
-        const responseNew = await fetch("http://localhost/valetservice/api/add_customers.php", {
+        // ✅ Cliente nuovo: registra tutto
+        const payload = {
+          ...customerData,
+          company_id,
+          location_id,
+        };
+  
+        const responseNew = await fetch("https://api.italinks.com/valet/add_customers.php", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(customerData),
+          body: JSON.stringify(payload),
         });
   
         const dataNew = await responseNew.json();
@@ -149,14 +356,7 @@ function Dashboard() {
         if (dataNew.success) {
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
-          setCustomerData({
-            first_name: "",
-            last_name: "",
-            phone_number: "",
-            vehicle_model: "",
-            color: "",
-            tag_number: "",
-          });
+          resetCustomerForm();
           fetchCustomers();
         } else {
           showToast.error("Error: " + dataNew.error);
@@ -166,7 +366,49 @@ function Dashboard() {
       showToast.error("Connection error");
     }
   };
-   
+
+  const [tagStatus, setTagStatus] = useState(null); // 'available' | 'unavailable' | null
+  const [checkingTag, setCheckingTag] = useState(false); // per gestire eventuale spinner
+
+
+  const checkTagAvailability = async () => {
+    if (!customerData.tag_number) {
+      setTagStatus(null);
+      return;
+    }
+
+    setCheckingTag(true);
+
+    try {
+      const response = await fetch("https://api.italinks.com/valet/check_tag.php", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          tag_number: parseInt(customerData.tag_number),
+          location_id: locationId,
+          company_id: companyId,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!data.success) {
+        console.error("Errore nel controllo tag:", data.error || "Errore sconosciuto");
+        setTagStatus(null);
+      } else {
+        setTagStatus(data.available ? "available" : "unavailable");
+      }
+    } catch (error) {
+      console.error("Tag check failed", error);
+      setTagStatus(null);
+    }
+
+    setCheckingTag(false);
+  };
+
+
 
   const handleUseExistingCustomer = async () => {
     if (!customerData.tag_number) {
@@ -177,26 +419,23 @@ function Dashboard() {
     }
   
     try {
-      const response = await axios.post("http://localhost/valetservice/api/add_existing_customer.php", {
+      const location_id = locationId;
+
+      const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
         customer_id: existingCustomer.customer_id,
         tag_number: parseInt(customerData.tag_number),
+        location_id,
+        company_id: companyId
       });
   
       if (response.data.success) {
         showToast.success("Existing customer added successfully!");
         setShowExistingModal(false);
         setShowFormModal(false);
-        setCustomerData({
-          first_name: "",
-          last_name: "",
-          phone_number: "",
-          vehicle_model: "",
-          color: "",
-          tag_number: "",
-        });
+        resetCustomerForm();
         fetchCustomers();
       } else {
-        showToast.error("Error adding existing customer.");
+        showToast.error("Error: " + response.data.error);
       }
     } catch (error) {
       showToast.error("Server Error.");
@@ -205,29 +444,76 @@ function Dashboard() {
   
   const updateStatus = async (customer_id, status) => {
     try {
-      const response = await fetch("http://localhost/valetservice/api/update_customer_status.php", {
+      const response = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customer_id, status }),
+        body: JSON.stringify({
+          customer_id,
+          status,
+          company_id: companyId,
+          location_id: locationId,
+          tag_number: selectedCustomer?.tag_number || null,
+        }),
       });
+
       const data = await response.json();
+
       if (data.success) {
         showToast.success("Status updated to " + status);
-        fetchCustomers();
+
+        setCustomers((prev) =>
+          sortByPriority(
+            prev.map((c) => {
+              if (c.customer_id !== customer_id) return c;
+
+              const updated = {
+                ...c,
+                status,
+                touchedAt: Date.now(),
+              };
+
+              // ⏱ Se status diventa PENDING → parte il timer
+              if (status === "PENDING") {
+                updated.requested_at = new Date().toISOString();
+              }
+
+              // ➕ Se status diventa CARE → conserva il requested_at esistente
+              else if (status === "CARE") {
+                updated.requested_at = c.requested_at || null;
+              }
+
+              // 🧼 Se torna a IN → azzera il timer
+              else if (status === "IN") {
+                updated.requested_at = null;
+              }
+
+              // ✅ Se OUT → conserva requested_at per analisi
+              else if (status === "OUT") {
+                updated.requested_at = c.requested_at || null;
+              }
+
+              return updated;
+            })
+          )
+        );
+
         setSelectedCustomer(null);
-      } else showToast.error("Status update failed: " + data.error);
-    } catch {
-      showToast.error("Status update error");
+      } else {
+        showToast.error("Status update failed: " + data.error);
+      }
+    } catch (error) {
+      console.error("🔥 Error updating status:", error);
+      showToast.error("An error occurred while updating status.");
     }
   };
-    
 
-  
+ 
     const handleCustomerClick = (customer) => {
-    setSelectedCustomer(
-      selectedCustomer?.customer_id === customer.customer_id ? null : customer
-    );
-  };
+      setSelectedCustomer(
+        selectedCustomer?.customer_id === customer.customer_id ? null : customer
+      );
+    };
+  
 
   const isToday = (createdAt) => {
     const entry = new Date(createdAt);
@@ -242,13 +528,17 @@ function Dashboard() {
   };
 
   const getElapsedTime = (createdAt) => {
-    const entry = new Date(createdAt);
-    const now = new Date();
-    const minutes = Math.floor((now - entry) / 60000);
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    return `${hours}h ${mins}m`;
+    const startDate = parseMySQL(createdAt, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
+
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
+
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
   };
+
 
   const todayCustomers = customers.filter(c => isToday(c.created_at));
   const inToday = todayCustomers.length;
@@ -257,109 +547,163 @@ function Dashboard() {
   const overnightCustomers = customers.filter(c => c.status === "OVERNIGHT");
   const countOvernight = overnightCustomers.length;
 
-  const filteredCustomers = todayCustomers.filter(c => {
-    const search = searchQuery.toLowerCase();
-    const matchesSearch =
-      c.first_name.toLowerCase().includes(search) ||
-      c.last_name.toLowerCase().includes(search) ||
-      c.phone_number.includes(search) ||
-      (c.tag_number && c.tag_number.toString().includes(search));
-    const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
-    return matchesSearch && matchesStatus;
-  });
+  const filteredCustomers = sortByPriority(todayCustomers   
+      .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
+      .filter((c) => {
+        const search = searchQuery.toLowerCase();
+        const matchesSearch =
+          c.first_name.toLowerCase().includes(search) ||
+          c.last_name.toLowerCase().includes(search) ||
+          c.phone_number.includes(search) ||
+          (c.tag_number && c.tag_number.toString().includes(search));
+        const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+        return matchesSearch && matchesStatus;
+      })
+  );
+
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center h-screen text-xl font-semibold text-gray-500">
+        Loading dashboard...
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen">
       
       {/* NAV BAR */}
-<div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
+  <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
 
-{/* Nome + Icone connessione */}
-<div className="flex items-center gap-3">
-  <div className="text-lg font-semibold text-gray-800">Evelyn Steakhouse</div>
-  <div className="flex items-center gap-2">
-    <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
-    <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
+  {/* Nome + Icone connessione */}
+  <div className="flex items-center gap-3">
+    <div className="text-lg font-semibold text-gray-800">
+      {locationName || "Valet Dashboard"}
+    </div>
+    <div className="flex items-center gap-2">
+      <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
+      <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
+    </div>
   </div>
-</div>
 
-{/* Contatori */}
-<div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-  <div className="text-black-600">TOT: {inToday}</div>
-  <div className="text-black-600">NOW: {nowCount}</div>
-  <div className="text-black-600">OUT: {outCount}</div>
+  {/* Contatori */}
+  <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
+    <div className="text-black-600">TOT: {inToday}</div>
+    <div className="text-black-600">NOW: {nowCount}</div>
+    <div className="text-black-600">OUT: {outCount}</div>
 
-  {countOvernight > 0 && (
-    <div className="text-black-600">OVN: {countOvernight}</div>
-  )}
-</div>
+    {countOvernight > 0 && (
+      <div className="text-black-600">OVN: {countOvernight}</div>
+    )}
+  </div>
 
-{/* Bottone impostazioni */}
-<button onClick={() => setShowSettingsModal(true)}>
-  <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
-</button>
+  {/* Bottone impostazioni */}
+  <button onClick={() => setShowSettingsModal(true)}>
+    <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
+  </button>
 
-</div>
+  </div>
 
 
       {/* TOP BAR */}
-      <div className="p-4 bg-gray-50 shadow-sm z-10 flex flex-col gap-2">
-        <div className="flex justify-between items-center">
-          <div className="relative w-full">
-            <input
-              type="text"
-              placeholder="Search by name, phone, or tag..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="border p-2 rounded w-full pr-10"
-            />
-            {searchQuery && (
-              <FaTimesCircle
-                className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
-                onClick={handleClearSearch}
-              />
-            )}
+<div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
+  <div className="flex flex-wrap justify-between items-center gap-3">
+
+    {/* Dropdown stato + etichetta attiva */}
+    <div className="flex flex-col">
+      <select
+        value={filterStatus}
+        onChange={(e) => setFilterStatus(e.target.value)}
+        className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
+      >
+        <option value="ALL">🔍 CLEAR Filter</option>
+        <option value="IN">🟢 IN</option>
+        <option value="PENDING">🟡 PENDING</option>
+        <option value="CARE">🟣 CARE</option>
+        <option value="OUT">🔴 OUT</option>
+        <option value="OVERNIGHT">🌙 OVERNIGHT</option>
+      </select>
+
+      {filterStatus !== "ALL" && (
+        <span className="text-sm text-gray-600 italic mt-1 ml-1">
+          Filter: {filterStatus}
+        </span>
+      )}
+    </div>
+
+    {/* Barra di ricerca */}
+    <div className="relative flex-1 min-w-[200px]">
+      <input
+        type="text"
+        placeholder="Search by name, phone, or tag..."
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        className="border p-2 rounded w-full pr-10"
+      />
+      {searchQuery && (
+        <FaTimesCircle
+          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
+          onClick={handleClearSearch}
+        />
+      )}
+    </div>
+
+    {/* Pulsante Add */}
+    <button
+      onClick={() => setShowFormModal(true)}
+      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
+    >
+      <span>Add</span>
+      <span>Customer</span>
+      </button>
+    </div>
+  </div>
+
+
+
+  {/* MAIN CONTENT - CLIENTI ATTUALI */}
+  <div className="grid grid-cols-4 gap-4">
+    {customSort(filteredCustomers).map((customer) => {
+      const isSelected = selectedCustomer?.customer_id === customer.customer_id;
+      const isPending = customer.status === "PENDING";
+      const isCare = customer.status === "CARE";
+
+      let bgColor = "bg-gray-800"; // default per IN
+      if (isPending) bgColor = "bg-[#0c6cbc]";
+      else if (isCare) bgColor = "bg-[#2bca65]";
+
+      return (
+        <div
+          key={customer.customer_id}
+          className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
+            ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
+          onClick={() => handleCustomerClick(customer)}
+        >
+          <div className="font-semibold">TAG #{customer.tag_number}</div>
+
+          {/* 🕒 Tempo dall'ingresso */}
+          <div className="text-xs text-gray-300 mt-1">
+            🕒 Check-in: {getElapsedTime(customer.created_at)}
           </div>
-          <button
-            onClick={() => setShowFormModal(true)}
-            className="ml-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm"
-          >
-            Add<br />Customer
-          </button>
-        </div>
-      </div>
 
-      {/* MAIN CONTENT - CLIENTI ATTUALI */}
-      <div className="grid grid-cols-4 gap-4">
-      {filteredCustomers.filter(c => !["OUT", "OVERNIGHT"].includes(c.status)).map((customer) => {
-        const isSelected = selectedCustomer?.customer_id === customer.customer_id;
-        const isPending = customer.status === "PENDING";
-        const isCare = customer.status === "CARE";
-
-        let bgColor = "bg-gray-800"; // default per IN
-        if (isPending) bgColor = "bg-[#0c6cbc]";
-        else if (isCare) bgColor = "bg-[#17d430]";
-
-        return (
-          <div key={customer.customer_id}
-            className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
-              ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
-            onClick={() => handleCustomerClick(customer)}
-          >
-            <div className="font-semibold">TAG #{customer.tag_number}</div>
-            <div className="text-xs mt-1">{getElapsedTime(customer.created_at)}</div>
-
-            {/* Punto esclamativo se PENDING */}
-              {isPending && (
-                <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
-                  !
-                </div>
-              )}
+          {/* ⏱ Tempo di attesa veicolo */}
+          {(isPending || isCare) && customer.requested_at && (
+            <div className="text-xs text-yellow-300 font-semibold mt-1">
+              ⏱ Wait: {formatElapsedTime(customer.requested_at)}
             </div>
-          );
-        })}
+          )}
 
-      </div>
+          {/* ⚠️ Punto esclamativo se è pending */}
+          {isPending && (
+            <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
+              !
+            </div>
+          )}
+        </div>
+      );
+    })}
+  </div>
 
 
         {/* OVERNIGHT CUSTOMERS */}
@@ -417,7 +761,7 @@ function Dashboard() {
             ) : (
               <>
                 <button
-                  className="bg-yellow-500 text-white w-40 h-20 rounded-md text-md font-semibold"
+                  className="bg-[#0c6cbc] text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
                     confirmAndUpdatePopup({
                       customerId: selectedCustomer.customer_id,
@@ -430,7 +774,7 @@ function Dashboard() {
                   Request Vehicle
                 </button>
                 <button
-                  className="bg-green-600 text-white w-40 h-20 rounded-md text-md font-semibold"
+                  className="bg-[#2bca65] text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
                     confirmAndUpdatePopup({
                       customerId: selectedCustomer.customer_id,
@@ -468,6 +812,20 @@ function Dashboard() {
                                   >
                   Checkout
                 </button>
+
+                <button
+                  className="bg-gray-800 text-white w-40 h-20 rounded-md text-md font-semibold"
+                  onClick={() =>
+                    confirmAndUpdatePopup({
+                      customerId: selectedCustomer.customer_id,
+                      status: "IN",
+                      label: "Repark",
+                      updateStatus,
+                    })
+                  }
+                                  >
+                  Repark
+                </button>
               </>
             )}
           </div>
@@ -480,14 +838,8 @@ function Dashboard() {
           className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50"
           onClick={() => {
             setShowFormModal(false);
-            setCustomerData({
-              first_name: "",
-              last_name: "",
-              phone_number: "",
-              vehicle_model: "",
-              color: "",
-              tag_number: "",
-            });
+            resetCustomerForm();
+
           }}>
         
             <div
@@ -497,18 +849,34 @@ function Dashboard() {
               <h2 className="text-xl font-semibold mb-4">New Customer</h2>
 
               <form onSubmit={handleSubmit}>
+
                 {/* Tag Number (Obbligatorio) */}
                 <label className="block mb-2">Tag Number*</label>
-                <input
-                  type="text"
-                  className={`border p-2 w-full rounded mb-4 transition-all duration-300 ${
-                    highlightTag ? "border-red-500 animate-pulse" : ""
-                  }`}
-                  value={customerData.tag_number}
-                  onChange={handleChange}
-                  name="tag_number"
-                  required
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    className={`border p-2 w-full rounded mb-4 transition-all duration-300 ${
+                      highlightTag ? "border-red-500 animate-pulse" : ""
+                    }`}
+                    value={customerData.tag_number}
+                    onChange={handleChange}
+                    onBlur={checkTagAvailability}
+                    name="tag_number"
+                    required
+                  />
+
+                  {/* LED Status */}
+                  {checkingTag && (
+                    <div className="w-3 h-3 rounded-full bg-gray-400 animate-pulse" title="Checking..."></div>
+                  )}
+                  {!checkingTag && tagStatus === "available" && (
+                    <div className="w-3 h-3 rounded-full bg-green-500" title="Tag disponibile"></div>
+                  )}
+                  {!checkingTag && tagStatus === "unavailable" && (
+                    <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" title="Tag già in uso"></div>
+                  )}
+                </div>
+
 
 
                 {/* Phone Number (Obbligatorio) */}
@@ -570,20 +938,16 @@ function Dashboard() {
                   className="bg-gray-300 px-4 py-2 rounded"
                   onClick={() => {
                     setShowFormModal(false);
-                    setCustomerData({
-                      first_name: "",
-                      last_name: "",
-                      phone_number: "",
-                      vehicle_model: "",
-                      color: "",
-                      tag_number: "",
-                    });
+                    resetCustomerForm();
+
                   }}
                 >
                   Cancel
                 </button>
 
-                  <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded">
+                  <button
+                    type="submit"
+                    className="bg-blue-600 text-white px-4 py-2 rounded flex items-center justify-center">
                     Add Customer
                   </button>
                 </div>
@@ -675,7 +1039,7 @@ function Dashboard() {
                     className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 text-white"
                     onClick={() => setShowSettingsModal(false)}
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    <svg xmlns="https://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                       strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" strokeWidth="2">
                       <path d="M9 11l-4 4l4 4m-4 -4h11a4 4 0 0 0 0 -8h-1"></path>
                     </svg>
@@ -709,7 +1073,7 @@ function Dashboard() {
             {/* Footer fisso con Back + Save + Logout */}
             <div className="p-4 border-t flex justify-center">
               <button className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 text-white" onClick={() => setSelectedSetting(null)}>
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                <svg xmlns="https://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                   strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6" strokeWidth="2">
                   <path d="M9 11l-4 4l4 4m-4 -4h11a4 4 0 0 0 0 -8h-1"></path>
                 </svg>

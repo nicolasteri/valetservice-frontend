@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { FaWifi, FaDatabase, FaCog, FaTimesCircle } from "react-icons/fa";
 import "react-toastify/dist/ReactToastify.css";
 import { showToast } from "../utils/ui/showToast";
@@ -41,6 +41,14 @@ function Dashboard() {
   };
   const [currentTime, setCurrentTime] = useState(() => Date.now());
 
+  const sortedCustomers = useMemo(() => {
+    const list = filteredCustomers ?? customers;
+    // “priority” = il tuo ordinamento client-side (customSort)
+    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
+    return sortField === "priority" ? customSort(list) : list;
+  }, [filteredCustomers, customers, sortField, sortDir]);
+
+
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
     return () => clearInterval(id);
@@ -80,8 +88,8 @@ function Dashboard() {
       const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
 
       return aNum - bNum;
-    });
-
+    }
+  );
 
   const formatElapsedTime = (timestamp) => {
     const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
@@ -160,7 +168,7 @@ function Dashboard() {
       fetchCustomers();
       setIsLoading(false);
     }
-  }, [companyId, locationId, filterStatus, searchQuery]);
+  }, [companyId, locationId, filterStatus, searchQuery,sortField, sortDir]);
 
  
   const handleOnline = () => setIsOnline(true);
@@ -197,8 +205,7 @@ function Dashboard() {
       console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
       return;
     }
-
-    // DEBUG
+    ///////// DEBUG
     console.log("📤 Sending filters:", {
       location_id: locationId,
       company_id: companyId,
@@ -207,18 +214,20 @@ function Dashboard() {
       timeRange: "today"
     });
 
+    const payload = {
+      location_id: locationId,
+      company_id: companyId,
+      ...(filterStatus !== "ALL" && { status: filterStatus }),
+      search: searchQuery,
+      timeRange: "today",
+      sortField, 
+      sortDir,    
+    };
+
     fetch("https://api.italinks.com/valet/get_customers.php", {
       method: "POST",
-      headers: {"Content-Type": "application/json",},
-            // DOPO – niente field “status” se siamo in CLEAR-filter
-      body: JSON.stringify({
-        location_id: locationId,
-        company_id: companyId,
-        ...(filterStatus !== "ALL" && { status: filterStatus }), // <-- solo se diverso da ALL
-        search: searchQuery,
-        timeRange: "today"
-      }),
-
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     })
       .then((res) => {
         setDbConnected(res.ok);
@@ -226,23 +235,22 @@ function Dashboard() {
       })
       .then((data) => {
         if (data.success && data.customers) {
-
           const prepared = data.customers.map((c) => ({
             ...c,
-            touchedAt: c.touchedAt || c.created_at,  // se il back-end lo manda ok; altrimenti fallback
+            touchedAt: c.touchedAt || c.created_at,
           }));
 
-          setCustomers(sortByPriority(prepared));    // 👈 set già ordinato
+          // ❗️NON ordinare qui: è già ordinato dal server
+          setCustomers(prepared);
         } else {
           console.error("❌ Failed fetching customers:", data.error || data);
         }
       })
-
       .catch((err) => {
         console.error("🔥 Fetch error:", err);
         setDbConnected(false);
       });
-  };
+
 
   const triggerOvernightUpdate = () => {
     if (!companyId || !locationId) {
@@ -408,7 +416,43 @@ function Dashboard() {
     setCheckingTag(false);
   };
 
+  // SORT BY default: Arrival ↓ (più recenti in alto)
+  const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
+  const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
 
+  function toggleSort(field) {
+    if (field === "priority") {
+      setSortField("priority");      // sort custom client-side
+      setSortDir("asc");             // irrilevante qui, ma lo teniamo
+      return;
+    }
+    setSortField((prev) => {
+      if (prev === field) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return prev;
+      } else {
+        setSortDir(field === "number" ? "asc" : "desc"); // number parte spesso asc
+        return field;
+      }
+    });
+  }
+  ////////// BOTTONE ORDINAMENTO //////////
+  function SortButton({ field, label }) {
+    const active = sortField === field;
+    const arrow = active ? (sortDir === "asc" ? "↑" : "↓") : "";
+
+    return (
+      <button
+        onClick={() => toggleSort(field)}
+        className={`px-3 py-2 rounded-md text-sm transition
+          ${active ? "bg-black text-white shadow" : "bg-gray-200 text-gray-900 hover:bg-gray-300"}
+        `}
+        title={active ? `Sorted ${label} ${sortDir}` : `Sort by ${label}`}
+      >
+        {label} {field !== "priority" && <span className="ml-1">{arrow}</span>}
+      </button>
+    );
+  }
 
   const handleUseExistingCustomer = async () => {
     if (!customerData.tag_number) {
@@ -606,65 +650,93 @@ function Dashboard() {
   </div>
 
 
-      {/* TOP BAR */}
-<div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
-  <div className="flex flex-wrap justify-between items-center gap-3">
+  {/* TOP BAR */}
+  <div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
+    <div className="flex flex-wrap justify-between items-center gap-3">
 
-    {/* Dropdown stato + etichetta attiva */}
-    <div className="flex flex-col">
-      <select
-        value={filterStatus}
-        onChange={(e) => setFilterStatus(e.target.value)}
-        className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
-      >
-        <option value="ALL">🔍 CLEAR Filter</option>
-        <option value="IN">🟢 IN</option>
-        <option value="PENDING">🟡 PENDING</option>
-        <option value="CARE">🟣 CARE</option>
-        <option value="OUT">🔴 OUT</option>
-        <option value="OVERNIGHT">🌙 OVERNIGHT</option>
-      </select>
+      {/* Dropdown stato + etichetta attiva */}
+      <div className="flex flex-col">
+        <select
+          value={filterStatus}
+          onChange={(e) => setFilterStatus(e.target.value)}
+          className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
+        >
+          <option value="ALL">🔍 CLEAR Filter</option>
+          <option value="IN">🟢 IN</option>
+          <option value="PENDING">🟡 PENDING</option>
+          <option value="CARE">🟣 CARE</option>
+          <option value="OUT">🔴 OUT</option>
+          <option value="OVERNIGHT">🌙 OVERNIGHT</option>
+        </select>
 
-      {filterStatus !== "ALL" && (
-        <span className="text-sm text-gray-600 italic mt-1 ml-1">
-          Filter: {filterStatus}
-        </span>
-      )}
-    </div>
+        {filterStatus !== "ALL" && (
+          <span className="text-sm text-gray-600 italic mt-1 ml-1">
+            Filter: {filterStatus}
+          </span>
+        )}
+      </div>
 
-    {/* Barra di ricerca */}
-    <div className="relative flex-1 min-w-[200px]">
-      <input
-        type="text"
-        placeholder="Search by name, phone, or tag..."
-        value={searchQuery}
-        onChange={(e) => setSearchQuery(e.target.value)}
-        className="border p-2 rounded w-full pr-10"
-      />
-      {searchQuery && (
-        <FaTimesCircle
-          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
-          onClick={handleClearSearch}
+      {/* Barra di ricerca */}
+      <div className="relative flex-1 min-w-[200px]">
+        <input
+          type="text"
+          placeholder="Search name, vehicle, tag, or last 4 digits…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="border p-2 rounded w-full pr-10"
         />
-      )}
-    </div>
+        {searchQuery && (
+          <FaTimesCircle
+            className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
+            onClick={handleClearSearch}
+          />
+        )}
+      </div>
 
-    {/* Pulsante Add */}
-    <button
-      onClick={() => setShowFormModal(true)}
-      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
-    >
-      <span>Add</span>
-      <span>Customer</span>
+      {/* SORT BY (variante compatta) */}
+      <div className="flex items-center gap-2 basis-full md:basis-auto order-last md:order-none">
+        <span className="text-sm font-medium">Sort:</span>
+
+        <select
+          value={sortField}
+          onChange={(e) => toggleSort(e.target.value)}
+          className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm"
+        >
+          <option value="priority">Priority</option>
+          <option value="number">Number</option>
+          <option value="arrival">Arrival</option>
+          <option value="urgency">Urgency</option>
+          <option value="name">Name</option>
+        </select>
+
+        {sortField !== "priority" && (
+          <button
+            onClick={() => setSortDir(d => (d === "asc" ? "desc" : "asc"))}
+            className="px-3 py-2 rounded bg-gray-200 text-sm hover:bg-gray-300"
+            title={`Direction: ${sortDir}`}
+          >
+            {sortDir === "asc" ? "↑" : "↓"}
+          </button>
+        )}
+      </div>
+
+      {/* Pulsante Add */}
+      <button
+        onClick={() => setShowFormModal(true)}
+        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
+      >
+        <span>Add</span>
+        <span>Customer</span>
       </button>
     </div>
   </div>
 
 
 
+
   {/* MAIN CONTENT - CLIENTI ATTUALI */}
   <div className="grid grid-cols-4 gap-4">
-    {customSort(filteredCustomers).map((customer) => {
+    {sortedCustomers.map((customer) => {
       const isSelected = selectedCustomer?.customer_id === customer.customer_id;
       const isPending = customer.status === "PENDING";
       const isCare = customer.status === "CARE";
@@ -1084,5 +1156,5 @@ function Dashboard() {
       )}
     </div>
   );
-}
+}}
 export default Dashboard;
