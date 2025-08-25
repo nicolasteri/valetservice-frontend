@@ -844,7 +844,7 @@ function Dashboard() {
 
 
         {/* OVERNIGHT CUSTOMERS */}
-        {overnighs.length > 0 && (
+        {overnights.length > 0 && (
           <div className="mt-6">
             <h3 className="text-lg font-semibold text-purple-700 mb-2">Overnight Vehicles</h3>
             <div className="grid grid-cols-4 gap-4">
