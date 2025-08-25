@@ -13,7 +13,51 @@ import { useNavigate } from "react-router-dom";
 
 
 function Dashboard() {
+
   const navigate = useNavigate();
+
+  // Ordine di visualizzazione: più basso = più in alto nella dashboard
+  const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
+  // costante usata dai sorter
+  const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };
+
+  // dichiara come "function" (le function declarations sono hoistate)
+  function sortByPriority(arr) {
+    return [...arr].sort((a, b) => {
+      const pa = statusPriority[a.status] ?? 99;
+      const pb = statusPriority[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+
+      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
+      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
+
+      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
+
+      return aNum - bNum;
+    });
+  }
+  // funzione di ordinamento custom per "priority"
+  function customSort(customers) {
+    const num = (ts) => {
+      const d = parseMySQL(ts, /* assumeUTC? */ false);
+      return d ? d.getTime() : Number.POSITIVE_INFINITY;
+    };
+
+    const pending = customers
+      .filter((c) => c.status === "PENDING")
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
+    const care = customers
+      .filter((c) => c.status === "CARE")
+      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+
+    const inside = customers
+      .filter((c) => c.status === "IN")
+      .sort((a, b) => num(a.created_at) - num(b.created_at));
+
+    return [...pending, ...care, ...inside];
+  }
   const [isOnline, setIsOnline] = useState(() => (isBrowser ? navigator.onLine : true));
   const [dbConnected, setDbConnected] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
@@ -50,12 +94,12 @@ function Dashboard() {
   }, []);
 
   // --- TIME HELPERS ---
-  const parseMySQL = (ts, assumeUTC = false) => {
+  function parseMySQL(ts, assumeUTC = false) {
     if (!ts || ts === '0000-00-00 00:00:00') return null;
     const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
     const d = new Date(assumeUTC ? iso + 'Z' : iso);
     return isNaN(d.getTime()) ? null : d;
-  };
+  }
 
   const [companyId, setCompanyId] = useState(null);
   const [locationId, setLocationId] = useState(null);
@@ -66,25 +110,6 @@ function Dashboard() {
   const [highlightTag, setHighlightTag] = useState(false);
   const [selectedSetting, setSelectedSetting] = useState(null);
 
-  // Ordine di visualizzazione: più basso = più in alto nella dashboard
-  const statusPriority = { PENDING: 0, CARE: 0, IN: 1 };   // più basso = più importante
-
-  const sortByPriority = (arr) =>
-    [...arr].sort((a, b) => {
-      const pa = statusPriority[a.status] ?? 99;
-      const pb = statusPriority[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
-
-      // Secondary: FIFO per timestamp rilevante
-      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
-      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
-
-      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-
-      return aNum - bNum;
-    }
-  );
 
   const formatElapsedTime = (timestamp) => {
     const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
@@ -98,31 +123,44 @@ function Dashboard() {
     return `${h}h ${m}m`;
   };
 
+  const todayCustomers = customers.filter(c => isToday(c.created_at));
+  const inToday = todayCustomers.length;
+  const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
+  const outCount = todayCustomers.filter(c => c.status === "OUT").length;
+  const countOvernight = overnights.length;
 
+  const filteredCustomers = sortByPriority(todayCustomers   
+    .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
+    .filter((c) => {
+      const s = (searchQuery || "").trim().toLowerCase();
 
-  // Funzione per ordinare e timer status PENDING e CARE 
-  const customSort = (customers) => {
-    const num = (ts) => {
-      const d = parseMySQL(ts, /* assumeUTC? */ false);
-      return d ? d.getTime() : Number.POSITIVE_INFINITY;
-    };
+      // 1) match su testo libero: nome, cognome, veicolo, colore, tag
+      const textHit =
+        (c.first_name   && c.first_name.toLowerCase().includes(s)) ||
+        (c.last_name    && c.last_name.toLowerCase().includes(s))  ||
+        (c.vehicle_model&& c.vehicle_model.toLowerCase().includes(s)) ||
+        (c.color        && c.color.toLowerCase().includes(s)) ||
+        (c.tag_number   && String(c.tag_number).includes(s));
 
-    const pending = customers
-      .filter((c) => c.status === "PENDING")
-      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+      // 2) match ultimi 4 del telefono (solo se l’utente digita >= 4 cifre)
+      const digits = s.replace(/\D/g, "");
+      const last4  = digits.length >= 4 ? digits.slice(-4) : null;
+      const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
+      const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
 
-    const care = customers
-      .filter((c) => c.status === "CARE")
-      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
+      const matchesSearch = s === "" ? true : (textHit || phoneHit);
 
-    const inside = customers
-      .filter((c) => c.status === "IN")
-      .sort((a, b) => num(a.created_at) - num(b.created_at));
+      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+      return matchesSearch && matchesStatus;
+    })
+  );
 
-    return [...pending, ...care, ...inside];
-  };
-
-
+  const sortedCustomers = useMemo(() => {
+    const list = filteredCustomers ?? customers;
+    // “priority” = il tuo ordinamento client-side (customSort)
+    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
+    return sortField === "priority" ? customSort(list) : list;
+  }, [filteredCustomers, customers, sortField, sortDir]);
 
   // Blocco per login e controllo dati
   const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
@@ -629,45 +667,6 @@ function Dashboard() {
     return `${h}h ${m}m`;
   };
 
-
-  const todayCustomers = customers.filter(c => isToday(c.created_at));
-  const inToday = todayCustomers.length;
-  const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
-  const outCount = todayCustomers.filter(c => c.status === "OUT").length;
-  const countOvernight = overnights.length;
-
-  const filteredCustomers = sortByPriority(todayCustomers   
-    .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
-    .filter((c) => {
-      const s = (searchQuery || "").trim().toLowerCase();
-
-      // 1) match su testo libero: nome, cognome, veicolo, colore, tag
-      const textHit =
-        (c.first_name   && c.first_name.toLowerCase().includes(s)) ||
-        (c.last_name    && c.last_name.toLowerCase().includes(s))  ||
-        (c.vehicle_model&& c.vehicle_model.toLowerCase().includes(s)) ||
-        (c.color        && c.color.toLowerCase().includes(s)) ||
-        (c.tag_number   && String(c.tag_number).includes(s));
-
-      // 2) match ultimi 4 del telefono (solo se l’utente digita >= 4 cifre)
-      const digits = s.replace(/\D/g, "");
-      const last4  = digits.length >= 4 ? digits.slice(-4) : null;
-      const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
-      const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
-
-      const matchesSearch = s === "" ? true : (textHit || phoneHit);
-
-      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
-      return matchesSearch && matchesStatus;
-    })
-  );
-
-  const sortedCustomers = useMemo(() => {
-    const list = filteredCustomers ?? customers;
-    // “priority” = il tuo ordinamento client-side (customSort)
-    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
-    return sortField === "priority" ? customSort(list) : list;
-  }, [filteredCustomers, customers, sortField, sortDir]);
 
   if (isLoading) {
     return (
