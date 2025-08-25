@@ -13,13 +13,43 @@ import { useNavigate } from "react-router-dom";
 
 
 function Dashboard() {
-
   const navigate = useNavigate();
+
+  // --- TIME HELPERS ---
+  function parseMySQL(ts, assumeUTC = false) {
+    if (!ts || ts === '0000-00-00 00:00:00') return null;
+    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
+    const d = new Date(assumeUTC ? iso + 'Z' : iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatElapsedTime(timestamp) {
+    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
+
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
+
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
+  }
+
+  function isToday(createdAt) {
+    const entry = new Date(createdAt);
+    const now = new Date();
+    const start = new Date(now);
+    const end = new Date(now);
+    start.setHours(5, 0, 0, 0);
+    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
+    end.setDate(start.getDate() + 1);
+    end.setHours(4, 59, 59, 999);
+    return entry >= start && entry <= end;
+  }
 
   // Ordine di visualizzazione: più basso = più in alto nella dashboard
   const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
-  // dichiara come "function" (le function declarations sono hoistate)
   function sortByPriority(arr) {
     return [...arr].sort((a, b) => {
       const pa = statusPriority[a.status] ?? 99;
@@ -91,13 +121,7 @@ function Dashboard() {
     return () => clearInterval(id);
   }, []);
 
-  // --- TIME HELPERS ---
-  function parseMySQL(ts, assumeUTC = false) {
-    if (!ts || ts === '0000-00-00 00:00:00') return null;
-    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
-    const d = new Date(assumeUTC ? iso + 'Z' : iso);
-    return isNaN(d.getTime()) ? null : d;
-  }
+  
 
   const [companyId, setCompanyId] = useState(null);
   const [locationId, setLocationId] = useState(null);
@@ -107,19 +131,6 @@ function Dashboard() {
   const [showExistingModal, setShowExistingModal] = useState(false);
   const [highlightTag, setHighlightTag] = useState(false);
   const [selectedSetting, setSelectedSetting] = useState(null);
-
-
-  const formatElapsedTime = (timestamp) => {
-    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
-    if (!startDate) return "00h 00m";
-
-    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
-    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
-
-    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
-    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
-    return `${h}h ${m}m`;
-  };
 
 
   // Blocco per login e controllo dati
@@ -603,18 +614,6 @@ function Dashboard() {
     };
   
 
-  const isToday = (createdAt) => {
-    const entry = new Date(createdAt);
-    const now = new Date();
-    const start = new Date(now);
-    const end = new Date(now);
-    start.setHours(5, 0, 0, 0);
-    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
-    end.setDate(start.getDate() + 1);
-    end.setHours(4, 59, 59, 999);
-    return entry >= start && entry <= end;
-  };
-
   const getElapsedTime = (createdAt) => {
     const startDate = parseMySQL(createdAt, /* assumeUTC? */ false);
     if (!startDate) return "00h 00m";
@@ -678,8 +677,7 @@ function Dashboard() {
   return (
     <div className="flex flex-col h-screen"> 
   
-  
- 
+
       {/* NAV BAR */}
         <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
 
