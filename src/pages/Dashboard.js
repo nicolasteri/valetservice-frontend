@@ -18,8 +18,6 @@ function Dashboard() {
 
   // Ordine di visualizzazione: più basso = più in alto nella dashboard
   const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
-  // costante usata dai sorter
-  const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };
 
   // dichiara come "function" (le function declarations sono hoistate)
   function sortByPriority(arr) {
@@ -664,7 +662,7 @@ function Dashboard() {
 
   const sortedCustomers = useMemo(() => {
     const list = filteredCustomers ?? customers;
-    // “priority” = il tuo ordinamento client-side (customSort)
+    
     // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
     return sortField === "priority" ? customSort(list) : list;
   }, [filteredCustomers, customers, sortField, sortDir]);
@@ -676,7 +674,7 @@ function Dashboard() {
       </div>
     );
   }
- //////////// !! TO CHECK !! /////////////
+ //////////// !! START RETURN FINALE !! /////////////
   return (
     <div className="flex flex-col h-screen"> 
   
