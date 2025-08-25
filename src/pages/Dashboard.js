@@ -123,44 +123,6 @@ function Dashboard() {
     return `${h}h ${m}m`;
   };
 
-  const todayCustomers = customers.filter(c => isToday(c.created_at));
-  const inToday = todayCustomers.length;
-  const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
-  const outCount = todayCustomers.filter(c => c.status === "OUT").length;
-  const countOvernight = overnights.length;
-
-  const filteredCustomers = sortByPriority(todayCustomers   
-    .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
-    .filter((c) => {
-      const s = (searchQuery || "").trim().toLowerCase();
-
-      // 1) match su testo libero: nome, cognome, veicolo, colore, tag
-      const textHit =
-        (c.first_name   && c.first_name.toLowerCase().includes(s)) ||
-        (c.last_name    && c.last_name.toLowerCase().includes(s))  ||
-        (c.vehicle_model&& c.vehicle_model.toLowerCase().includes(s)) ||
-        (c.color        && c.color.toLowerCase().includes(s)) ||
-        (c.tag_number   && String(c.tag_number).includes(s));
-
-      // 2) match ultimi 4 del telefono (solo se l’utente digita >= 4 cifre)
-      const digits = s.replace(/\D/g, "");
-      const last4  = digits.length >= 4 ? digits.slice(-4) : null;
-      const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
-      const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
-
-      const matchesSearch = s === "" ? true : (textHit || phoneHit);
-
-      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
-      return matchesSearch && matchesStatus;
-    })
-  );
-
-  const sortedCustomers = useMemo(() => {
-    const list = filteredCustomers ?? customers;
-    // “priority” = il tuo ordinamento client-side (customSort)
-    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
-    return sortField === "priority" ? customSort(list) : list;
-  }, [filteredCustomers, customers, sortField, sortDir]);
 
   // Blocco per login e controllo dati
   const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
@@ -667,6 +629,45 @@ function Dashboard() {
     return `${h}h ${m}m`;
   };
 
+
+  const todayCustomers = customers.filter(c => isToday(c.created_at));
+  const inToday = todayCustomers.length;
+  const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
+  const outCount = todayCustomers.filter(c => c.status === "OUT").length;
+  const countOvernight = overnights.length;
+
+  const filteredCustomers = sortByPriority(todayCustomers   
+    .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
+    .filter((c) => {
+      const s = (searchQuery || "").trim().toLowerCase();
+
+      // 1) match su testo libero: nome, cognome, veicolo, colore, tag
+      const textHit =
+        (c.first_name   && c.first_name.toLowerCase().includes(s)) ||
+        (c.last_name    && c.last_name.toLowerCase().includes(s))  ||
+        (c.vehicle_model&& c.vehicle_model.toLowerCase().includes(s)) ||
+        (c.color        && c.color.toLowerCase().includes(s)) ||
+        (c.tag_number   && String(c.tag_number).includes(s));
+
+      // 2) match ultimi 4 del telefono (solo se l’utente digita >= 4 cifre)
+      const digits = s.replace(/\D/g, "");
+      const last4  = digits.length >= 4 ? digits.slice(-4) : null;
+      const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
+      const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
+
+      const matchesSearch = s === "" ? true : (textHit || phoneHit);
+
+      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+      return matchesSearch && matchesStatus;
+    })
+  );
+
+  const sortedCustomers = useMemo(() => {
+    const list = filteredCustomers ?? customers;
+    // “priority” = il tuo ordinamento client-side (customSort)
+    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
+    return sortField === "priority" ? customSort(list) : list;
+  }, [filteredCustomers, customers, sortField, sortDir]);
 
   if (isLoading) {
     return (
