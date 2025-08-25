@@ -252,20 +252,20 @@ function Dashboard() {
     }
   }
 
-useEffect(() => {
-  const validIds =
-    typeof companyId === "number" &&
-    typeof locationId === "number" &&
-    !isNaN(companyId) && !isNaN(locationId);
+  useEffect(() => {
+    const validIds =
+        typeof companyId === "number" &&
+        typeof locationId === "number" &&
+        !isNaN(companyId) && !isNaN(locationId);
 
-  if (!validIds) return;
+    if (!validIds) return;
 
-  // Aggiorna overnight sul server (idempotente) poi scarica la lista overnight
-  (async () => {
-    await triggerOvernightUpdate();
-    await fetchOvernights();
-  })();
-}, [companyId, locationId]);
+    // Aggiorna overnight sul server (idempotente) poi scarica la lista overnight
+    (async () => {
+        await triggerOvernightUpdate();
+        await fetchOvernights();
+    })();
+  }, [companyId, locationId]);
 
 
   const payload = {
@@ -1221,5 +1221,5 @@ useEffect(() => {
       )}
     </div>
   );
-}}
+}
 export default Dashboard;
