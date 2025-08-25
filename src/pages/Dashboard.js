@@ -21,6 +21,9 @@ function Dashboard() {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("ALL");
+  // Overnight list (separata dalla lista "today")
+  const [overnights, setOvernights] = useState([]);
+
   const [customerData, setCustomerData] = useState({
     first_name: "",
     last_name: "",
@@ -40,14 +43,6 @@ function Dashboard() {
     });
   };
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-
-  const sortedCustomers = useMemo(() => {
-    const list = filteredCustomers ?? customers;
-    // “priority” = il tuo ordinamento client-side (customSort)
-    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
-    return sortField === "priority" ? customSort(list) : list;
-  }, [filteredCustomers, customers, sortField, sortDir]);
-
 
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
@@ -158,17 +153,26 @@ function Dashboard() {
   }, [navigate]);
 
   useEffect(() => {
-    if (
+    const validIds =
       typeof companyId === "number" &&
       typeof locationId === "number" &&
-      !isNaN(companyId) &&
-      !isNaN(locationId)
-    ) {
-      triggerOvernightUpdate();
-      fetchCustomers();
-      setIsLoading(false);
-    }
-  }, [companyId, locationId, filterStatus, searchQuery,sortField, sortDir]);
+      !isNaN(companyId) && !isNaN(locationId);
+
+    if (!validIds) return;
+
+    let cancelled = false;
+    setIsLoading(true);
+
+    (async () => {
+      try {
+        await fetchCustomers();      // <-- aspetta che finisca
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
 
  
   const handleOnline = () => setIsOnline(true);
@@ -212,44 +216,94 @@ function Dashboard() {
       status: filterStatus,
       search: searchQuery,
       timeRange: "today"
-    });
-
-    const payload = {
-      location_id: locationId,
-      company_id: companyId,
-      ...(filterStatus !== "ALL" && { status: filterStatus }),
-      search: searchQuery,
-      timeRange: "today",
-      sortField, 
-      sortDir,    
-    };
-
-    fetch("https://api.italinks.com/valet/get_customers.php", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
     })
-      .then((res) => {
-        setDbConnected(res.ok);
-        return res.json();
-      })
-      .then((data) => {
-        if (data.success && data.customers) {
-          const prepared = data.customers.map((c) => ({
+  }
+
+  async function fetchOvernights() {
+    try {
+      const payload = {
+        location_id: locationId,
+        company_id: companyId,
+        timeRange: "overnight",
+        // se vuoi ordinare: arrival asc
+        sortField: "arrival",
+        sortDir: "asc",
+      };
+
+      const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (data.success && Array.isArray(data.customers)) {
+        setOvernights(
+          data.customers.map((c) => ({
             ...c,
             touchedAt: c.touchedAt || c.created_at,
-          }));
+          }))
+        );
+      } else {
+        console.warn("Overnight fetch failed:", data);
+      }
+    } catch (e) {
+      console.error("Overnight fetch error:", e);
+    }
+  }
 
-          // ❗️NON ordinare qui: è già ordinato dal server
-          setCustomers(prepared);
-        } else {
-          console.error("❌ Failed fetching customers:", data.error || data);
-        }
-      })
-      .catch((err) => {
-        console.error("🔥 Fetch error:", err);
-        setDbConnected(false);
-      });
+useEffect(() => {
+  const validIds =
+    typeof companyId === "number" &&
+    typeof locationId === "number" &&
+    !isNaN(companyId) && !isNaN(locationId);
+
+  if (!validIds) return;
+
+  // Aggiorna overnight sul server (idempotente) poi scarica la lista overnight
+  (async () => {
+    await triggerOvernightUpdate();
+    await fetchOvernights();
+  })();
+}, [companyId, locationId]);
+
+
+  const payload = {
+    location_id: locationId,
+    company_id: companyId,
+    ...(filterStatus !== "ALL" && { status: filterStatus }),
+    search: searchQuery,
+    timeRange: "today",
+    sortField, 
+    sortDir,    
+  };
+
+  fetch("https://api.italinks.com/valet/get_customers.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => {
+      setDbConnected(res.ok);
+      return res.json();
+    })
+    .then((data) => {
+      if (data.success && data.customers) {
+        const prepared = data.customers.map((c) => ({
+          ...c,
+          touchedAt: c.touchedAt || c.created_at,
+        }));
+
+        // ❗️NON ordinare qui: è già ordinato dal server
+        setCustomers(prepared);
+      } else {
+        console.error("❌ Failed fetching customers:", data.error || data);
+      }
+    })
+    .catch((err) => {
+      console.error("🔥 Fetch error:", err);
+      setDbConnected(false);
+    });
 
 
   const triggerOvernightUpdate = () => {
@@ -426,15 +480,7 @@ function Dashboard() {
       setSortDir("asc");             // irrilevante qui, ma lo teniamo
       return;
     }
-    setSortField((prev) => {
-      if (prev === field) {
-        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-        return prev;
-      } else {
-        setSortDir(field === "number" ? "asc" : "desc"); // number parte spesso asc
-        return field;
-      }
-    });
+    setSortField(field);
   }
   ////////// BOTTONE ORDINAMENTO //////////
   function SortButton({ field, label }) {
@@ -588,23 +634,40 @@ function Dashboard() {
   const inToday = todayCustomers.length;
   const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
   const outCount = todayCustomers.filter(c => c.status === "OUT").length;
-  const overnightCustomers = customers.filter(c => c.status === "OVERNIGHT");
-  const countOvernight = overnightCustomers.length;
+  const countOvernight = overnights.length;
 
   const filteredCustomers = sortByPriority(todayCustomers   
-      .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
-      .filter((c) => {
-        const search = searchQuery.toLowerCase();
-        const matchesSearch =
-          c.first_name.toLowerCase().includes(search) ||
-          c.last_name.toLowerCase().includes(search) ||
-          c.phone_number.includes(search) ||
-          (c.tag_number && c.tag_number.toString().includes(search));
-        const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
-        return matchesSearch && matchesStatus;
-      })
+    .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
+    .filter((c) => {
+      const s = (searchQuery || "").trim().toLowerCase();
+
+      // 1) match su testo libero: nome, cognome, veicolo, colore, tag
+      const textHit =
+        (c.first_name   && c.first_name.toLowerCase().includes(s)) ||
+        (c.last_name    && c.last_name.toLowerCase().includes(s))  ||
+        (c.vehicle_model&& c.vehicle_model.toLowerCase().includes(s)) ||
+        (c.color        && c.color.toLowerCase().includes(s)) ||
+        (c.tag_number   && String(c.tag_number).includes(s));
+
+      // 2) match ultimi 4 del telefono (solo se l’utente digita >= 4 cifre)
+      const digits = s.replace(/\D/g, "");
+      const last4  = digits.length >= 4 ? digits.slice(-4) : null;
+      const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
+      const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
+
+      const matchesSearch = s === "" ? true : (textHit || phoneHit);
+
+      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+      return matchesSearch && matchesStatus;
+    })
   );
 
+  const sortedCustomers = useMemo(() => {
+    const list = filteredCustomers ?? customers;
+    // “priority” = il tuo ordinamento client-side (customSort)
+    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
+    return sortField === "priority" ? customSort(list) : list;
+  }, [filteredCustomers, customers, sortField, sortDir]);
 
   if (isLoading) {
     return (
@@ -613,169 +676,171 @@ function Dashboard() {
       </div>
     );
   }
-
+ //////////// !! TO CHECK !! /////////////
   return (
-    <div className="flex flex-col h-screen">
-      
+    <div className="flex flex-col h-screen"> 
+  
+  
+ 
       {/* NAV BAR */}
-  <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
+        <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
 
-  {/* Nome + Icone connessione */}
-  <div className="flex items-center gap-3">
-    <div className="text-lg font-semibold text-gray-800">
-      {locationName || "Valet Dashboard"}
-    </div>
-    <div className="flex items-center gap-2">
-      <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
-      <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
-    </div>
-  </div>
-
-  {/* Contatori */}
-  <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-    <div className="text-black-600">TOT: {inToday}</div>
-    <div className="text-black-600">NOW: {nowCount}</div>
-    <div className="text-black-600">OUT: {outCount}</div>
-
-    {countOvernight > 0 && (
-      <div className="text-black-600">OVN: {countOvernight}</div>
-    )}
-  </div>
-
-  {/* Bottone impostazioni */}
-  <button onClick={() => setShowSettingsModal(true)}>
-    <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
-  </button>
-
-  </div>
-
-
-  {/* TOP BAR */}
-  <div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
-    <div className="flex flex-wrap justify-between items-center gap-3">
-
-      {/* Dropdown stato + etichetta attiva */}
-      <div className="flex flex-col">
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
-          className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
-        >
-          <option value="ALL">🔍 CLEAR Filter</option>
-          <option value="IN">🟢 IN</option>
-          <option value="PENDING">🟡 PENDING</option>
-          <option value="CARE">🟣 CARE</option>
-          <option value="OUT">🔴 OUT</option>
-          <option value="OVERNIGHT">🌙 OVERNIGHT</option>
-        </select>
-
-        {filterStatus !== "ALL" && (
-          <span className="text-sm text-gray-600 italic mt-1 ml-1">
-            Filter: {filterStatus}
-          </span>
-        )}
-      </div>
-
-      {/* Barra di ricerca */}
-      <div className="relative flex-1 min-w-[200px]">
-        <input
-          type="text"
-          placeholder="Search name, vehicle, tag, or last 4 digits…"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="border p-2 rounded w-full pr-10"
-        />
-        {searchQuery && (
-          <FaTimesCircle
-            className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
-            onClick={handleClearSearch}
-          />
-        )}
-      </div>
-
-      {/* SORT BY (variante compatta) */}
-      <div className="flex items-center gap-2 basis-full md:basis-auto order-last md:order-none">
-        <span className="text-sm font-medium">Sort:</span>
-
-        <select
-          value={sortField}
-          onChange={(e) => toggleSort(e.target.value)}
-          className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm"
-        >
-          <option value="priority">Priority</option>
-          <option value="number">Number</option>
-          <option value="arrival">Arrival</option>
-          <option value="urgency">Urgency</option>
-          <option value="name">Name</option>
-        </select>
-
-        {sortField !== "priority" && (
-          <button
-            onClick={() => setSortDir(d => (d === "asc" ? "desc" : "asc"))}
-            className="px-3 py-2 rounded bg-gray-200 text-sm hover:bg-gray-300"
-            title={`Direction: ${sortDir}`}
-          >
-            {sortDir === "asc" ? "↑" : "↓"}
-          </button>
-        )}
-      </div>
-
-      {/* Pulsante Add */}
-      <button
-        onClick={() => setShowFormModal(true)}
-        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
-      >
-        <span>Add</span>
-        <span>Customer</span>
-      </button>
-    </div>
-  </div>
-
-
-
-
-  {/* MAIN CONTENT - CLIENTI ATTUALI */}
-  <div className="grid grid-cols-4 gap-4">
-    {sortedCustomers.map((customer) => {
-      const isSelected = selectedCustomer?.customer_id === customer.customer_id;
-      const isPending = customer.status === "PENDING";
-      const isCare = customer.status === "CARE";
-
-      let bgColor = "bg-gray-800"; // default per IN
-      if (isPending) bgColor = "bg-[#0c6cbc]";
-      else if (isCare) bgColor = "bg-[#2bca65]";
-
-      return (
-        <div
-          key={customer.customer_id}
-          className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
-            ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
-          onClick={() => handleCustomerClick(customer)}
-        >
-          <div className="font-semibold">TAG #{customer.tag_number}</div>
-
-          {/* 🕒 Tempo dall'ingresso */}
-          <div className="text-xs text-gray-300 mt-1">
-            🕒 Check-in: {getElapsedTime(customer.created_at)}
+          {/* Nome + Icone connessione */}
+          <div className="flex items-center gap-3">
+            <div className="text-lg font-semibold text-gray-800">
+              {locationName || "Valet Dashboard"}
+            </div>
+            <div className="flex items-center gap-2">
+              <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
+              <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
+            </div>
           </div>
 
-          {/* ⏱ Tempo di attesa veicolo */}
-          {(isPending || isCare) && customer.requested_at && (
-            <div className="text-xs text-yellow-300 font-semibold mt-1">
-              ⏱ Wait: {formatElapsedTime(customer.requested_at)}
-            </div>
-          )}
+          {/* Contatori */}
+          <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
+            <div className="text-black-600">TOT: {inToday}</div>
+            <div className="text-black-600">NOW: {nowCount}</div>
+            <div className="text-black-600">OUT: {outCount}</div>
 
-          {/* ⚠️ Punto esclamativo se è pending */}
-          {isPending && (
-            <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
-              !
-            </div>
-          )}
+            {countOvernight > 0 && (
+              <div className="text-black-600">OVN: {countOvernight}</div>
+            )}
+          </div>
+
+          {/* Bottone impostazioni */}
+          <button onClick={() => setShowSettingsModal(true)}>
+            <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
+          </button>
+
         </div>
-      );
-    })}
-  </div>
+
+
+        {/* TOP BAR */}
+        <div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
+          <div className="flex flex-wrap justify-between items-center gap-3">
+
+            {/* Dropdown stato + etichetta attiva */}
+            <div className="flex flex-col">
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
+              >
+                <option value="ALL">🔍 CLEAR Filter</option>
+                <option value="IN">🟢 IN</option>
+                <option value="PENDING">🟡 PENDING</option>
+                <option value="CARE">🟣 CARE</option>
+                <option value="OUT">🔴 OUT</option>
+                <option value="OVERNIGHT">🌙 OVERNIGHT</option>
+              </select>
+
+              {filterStatus !== "ALL" && (
+                <span className="text-sm text-gray-600 italic mt-1 ml-1">
+                  Filter: {filterStatus}
+                </span>
+              )}
+            </div>
+
+            {/* Barra di ricerca */}
+            <div className="relative flex-1 min-w-[200px]">
+              <input
+                type="text"
+                placeholder="Search name, vehicle, tag, or last 4 digits…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="border p-2 rounded w-full pr-10"
+              />
+              {searchQuery && (
+                <FaTimesCircle
+                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
+                  onClick={handleClearSearch}
+                />
+              )}
+            </div>
+
+            {/* SORT BY (variante compatta) */}
+            <div className="flex items-center gap-2 basis-full md:basis-auto order-last md:order-none">
+              <span className="text-sm font-medium">Sort:</span>
+
+              <select
+                value={sortField}
+                onChange={(e) => toggleSort(e.target.value)}
+                className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm"
+              >
+                <option value="priority">Priority</option>
+                <option value="number">Number</option>
+                <option value="arrival">Arrival</option>
+                <option value="urgency">Urgency</option>
+                <option value="name">Name</option>
+              </select>
+
+              {sortField !== "priority" && (
+                <button
+                  onClick={() => setSortDir(d => (d === "asc" ? "desc" : "asc"))}
+                  className="px-3 py-2 rounded bg-gray-200 text-sm hover:bg-gray-300"
+                  title={`Direction: ${sortDir}`}
+                >
+                  {sortDir === "asc" ? "↑" : "↓"}
+                </button>
+              )}
+            </div>
+
+            {/* Pulsante Add */}
+            <button
+              onClick={() => setShowFormModal(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
+            >
+              <span>Add</span>
+              <span>Customer</span>
+            </button>
+          </div>
+        </div>
+
+
+
+
+        {/* MAIN CONTENT - CLIENTI ATTUALI */}
+        <div className="grid grid-cols-4 gap-4">
+          {sortedCustomers.map((customer) => {
+            const isSelected = selectedCustomer?.customer_id === customer.customer_id;
+            const isPending = customer.status === "PENDING";
+            const isCare = customer.status === "CARE";
+
+            let bgColor = "bg-gray-800"; // default per IN
+            if (isPending) bgColor = "bg-[#0c6cbc]";
+            else if (isCare) bgColor = "bg-[#2bca65]";
+
+            return (
+              <div
+                key={customer.customer_id}
+                className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
+                  ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
+                onClick={() => handleCustomerClick(customer)}
+              >
+                <div className="font-semibold">TAG #{customer.tag_number}</div>
+
+                {/* 🕒 Tempo dall'ingresso */}
+                <div className="text-xs text-gray-300 mt-1">
+                  🕒 Check-in: {getElapsedTime(customer.created_at)}
+                </div>
+
+                {/* ⏱ Tempo di attesa veicolo */}
+                {(isPending || isCare) && customer.requested_at && (
+                  <div className="text-xs text-yellow-300 font-semibold mt-1">
+                    ⏱ Wait: {formatElapsedTime(customer.requested_at)}
+                  </div>
+                )}
+
+                {/* ⚠️ Punto esclamativo se è pending */}
+                {isPending && (
+                  <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
+                    !
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
 
 
         {/* OVERNIGHT CUSTOMERS */}
@@ -783,7 +848,7 @@ function Dashboard() {
           <div className="mt-6">
             <h3 className="text-lg font-semibold text-purple-700 mb-2">Overnight Vehicles</h3>
             <div className="grid grid-cols-4 gap-4">
-            {overnightCustomers.map((customer) => {
+            {overnights.map((customer) => {
               const isSelected = selectedCustomer?.customer_id === customer.customer_id;
 
               return (
