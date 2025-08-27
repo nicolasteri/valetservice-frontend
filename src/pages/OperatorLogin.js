@@ -10,7 +10,7 @@ function OperatorLogin() {
   const companyCodeRaw = queryParams.get("company_code");
 
   const [locationCode, setLocationCode] = useState("");
-  const [companyId, setCompanyId] = useState(null);
+  /* const [companyId, setCompanyId] = useState(null);
 
   useEffect(() => {
     const storedCompanyId = localStorage.getItem("company_id");
@@ -21,7 +21,16 @@ function OperatorLogin() {
       navigate("/company-login");
     }
   }, [navigate]);
- 
+ */
+
+  useEffect(() => {
+    const storedCompanyId = localStorage.getItem("company_id");
+    if (!storedCompanyId) {
+      showToast.error("Missing company reference");
+      navigate("/company-login");
+    }
+  }, [navigate]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -52,7 +61,6 @@ function OperatorLogin() {
         localStorage.setItem("location_name", data.location_name);
 
         showToast.success(`Welcome to ${data.location_name}`);
-
         console.log("✅ Dati salvati nel localStorage, pronto a navigare");
 
         // 👇 Aspetta 100ms per assicurarti che i dati siano scritti prima del redirect
@@ -82,7 +90,7 @@ function OperatorLogin() {
             className="border p-2 w-full rounded mb-4 text-center"
             value={locationCode}
             onChange={(e) => setLocationCode(e.target.value.replace(/\D/g, ""))}
-            placeholder="1234"
+            placeholder="xxxx"
             maxLength={4}
             required
           />

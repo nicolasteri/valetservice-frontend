@@ -4,9 +4,9 @@ import { showToast } from "../utils/ui/showToast";
 import "react-toastify/dist/ReactToastify.css";
 import { handleDownloadWeek, handleResetWeek } from "../gapi/WeeklyReportTools";
 import { FaSpinner } from "react-icons/fa";
-import { confirmAlert } from "react-confirm-alert";
 import "react-confirm-alert/src/react-confirm-alert.css";
 import { showConfirmPopup } from "../utils/ui/ConfirmPopup";
+// import { confirmAlert } from "react-confirm-alert";
 
 const CLIENT_ID = "669630153960-om8ojkoj2failsa0jvg823g70963v95c.apps.googleusercontent.com";
 const API_KEY = "AIzaSyCkf61rUYZyIhdCO312ZbW49MFBYEOayPE";
