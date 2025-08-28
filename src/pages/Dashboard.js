@@ -10,7 +10,8 @@ import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
 // Ordine di visualizzazione: più basso = più in alto nella dashboard
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
-  
+
+const STATUS_ENDPOINT = "https://api.italinks.com/valet/update_customer_status.php";  
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
 
@@ -90,6 +91,17 @@ function Dashboard() {
     },
     [sortDir]
   );
+
+  const refreshData = useCallback(async () => {
+    try {
+      const [resToday, resOver] = await Promise.all([
+        axios.post("https://api.italinks.com/valet/get_customers.php", { company_id, location_id, timeRange: "today" }),
+        axios.post("https://api.italinks.com/valet/get_overnights.php", { company_id, location_id }),
+      ]);
+      setCustomers(resToday.data?.customers ?? []);
+      setOvernights(resOver.data?.customers ?? []);
+    } catch (e) { showToast.error("Refresh failed"); }
+  }, [company_id, location_id]);
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -550,25 +562,6 @@ function Dashboard() {
     setCheckingTag(false);
   };
 
-
-  ////////// BOTTONE ORDINAMENTO //////////*
-//  function SortButton({ field, label }) {
-//    const active = sortField === field;
-//    const arrow = active ? (sortDir === "asc" ? "↑" : "↓") : "";
-
-//    return (
-//      <button
-//        onClick={() => toggleSort(field)}
-//        className={`px-3 py-2 rounded-md text-sm transition
-//          ${active ? "bg-black text-white shadow" : "bg-gray-200 text-gray-900 hover:bg-gray-300"}
-//        `}
-//        title={active ? `Sorted ${label} ${sortDir}` : `Sort by ${label}`}
-//      >
-//        {label} {field !== "priority" && <span className="ml-1">{arrow}</span>}
-//      </button>
-//    );
-//  }
-
   const handleUseExistingCustomer = async () => {
     if (!customerData.tag_number) {
       setHighlightTag(true);
@@ -601,9 +594,63 @@ function Dashboard() {
     }
   };
   
-  const updateStatus = async (customer_id, status) => {
+  const updateStatus = async (customer_id, status, opts = {}) => {
+    // 🔎 stato corrente per rollback
+    const snapshotCustomers = customers;
+    const snapshotOvernights = overnights;
+
+    // tag_number: usa quello passato o quello del selectedCustomer
+    const tag_number = opts.tag_number ?? selectedCustomer?.tag_number ?? null;
+
+    // trova il record corrente
+    const current = customers.find((c) => c.customer_id === customer_id);
+    if (!current) {
+      showToast.error("Customer not found");
+      return;
+    }
+    const prevStatus = current.status;
+
+    // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
+    if (status === "OVERNIGHT") {
+      // toglilo dalle liste del giorno (i tuoi filtri escludono OVERNIGHT) e mettilo subito tra gli overnights
+      setCustomers((prev) =>
+        customSort(
+          prev.map((c) =>
+            c.customer_id === customer_id
+              ? { ...c, status: "OVERNIGHT", touchedAt: Date.now() }
+              : c
+          )
+        )
+      );
+      setOvernights((prev) => {
+        const updated = { ...current, status: "OVERNIGHT", touchedAt: Date.now() };
+        const exists = prev.some((c) => c.customer_id === customer_id);
+        return exists
+          ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
+          : [updated, ...prev];
+      });
+    } else if (status === "OUT") {
+      // segna OUT subito e rimuovilo dagli overnights se c’era
+      setCustomers((prev) =>
+        customSort(
+          prev.map((c) => {
+            if (c.customer_id !== customer_id) return c;
+            return {
+              ...c,
+              status: "OUT",
+              touchedAt: Date.now(),
+              // conserva requested_at per analisi
+              requested_at: c.requested_at || null,
+            };
+          })
+        )
+      );
+      setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
+    }
+
     try {
-      const response = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
+      // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
+      const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -611,15 +658,14 @@ function Dashboard() {
           status,
           company_id: companyId,
           location_id: locationId,
-          tag_number: selectedCustomer?.tag_number || null,
+          tag_number,
         }),
       });
 
-      const data = await response.json();
+      const data = await res.json();
 
       if (data.success) {
-        showToast.success("Status updated to " + status);
-
+        // ✅ 3) Allinea lo stato locale per tutti i casi (PENDING, CARE, IN inclusi)
         setCustomers((prev) =>
           customSort(
             prev.map((c) => {
@@ -631,24 +677,18 @@ function Dashboard() {
                 touchedAt: Date.now(),
               };
 
-              // ⏱ Se status diventa PENDING → parte il timer
+              // regole timer/fields come prima
               if (status === "PENDING") {
                 updated.requested_at = new Date().toISOString();
-              }
-
-              // ➕ Se status diventa CARE → conserva il requested_at esistente
-              else if (status === "CARE") {
+              } else if (status === "CARE") {
                 updated.requested_at = c.requested_at || null;
-              }
-
-              // 🧼 Se torna a IN → azzera il timer
-              else if (status === "IN") {
+              } else if (status === "IN") {
                 updated.requested_at = null;
-              }
-
-              // ✅ Se OUT → conserva requested_at per analisi
-              else if (status === "OUT") {
+              } else if (status === "OUT") {
                 updated.requested_at = c.requested_at || null;
+              } else if (status === "OVERNIGHT") {
+                // di solito manteniamo requested_at (se esiste) o created_at guida il sort nella sezione overnight
+                updated.requested_at = c.requested_at || c.requested_at ?? null;
               }
 
               return updated;
@@ -656,22 +696,50 @@ function Dashboard() {
           )
         );
 
+        // se è OVERNIGHT e non era già stato trattato in ottimistico (es. se in futuro togli l’ottimistico), aggiungilo
+        if (status === "OVERNIGHT") {
+          setOvernights((prev) => {
+            const updated = customers.find((c) => c.customer_id === customer_id) || current;
+            const exists = prev.some((c) => c.customer_id === customer_id);
+            return exists
+              ? prev.map((c) => (c.customer_id === customer_id ? { ...updated, status: "OVERNIGHT" } : c))
+              : [{ ...updated, status: "OVERNIGHT" }, ...prev];
+          });
+        }
+
+        showToast.success(
+          status === "OVERNIGHT"
+            ? "Marked OVERNIGHT"
+            : status === "OUT"
+            ? "Checkout completed"
+            : `Status updated to ${status}`
+        );
+
+        // chiudi eventuale popup
         setSelectedCustomer(null);
       } else {
-        showToast.error("Status update failed: " + data.error);
+        // ❌ rollback
+        showToast.error("Status update failed: " + (data.error || "Unknown error"));
+        setCustomers(snapshotCustomers);
+        setOvernights(snapshotOvernights);
+        // opzionale: refreshData?.();
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
       showToast.error("An error occurred while updating status.");
+      // ❌ rollback
+      setCustomers(snapshotCustomers);
+      setOvernights(snapshotOvernights);
+      // opzionale: refreshData?.();
     }
   };
 
  
-    const handleCustomerClick = (customer) => {
-      setSelectedCustomer(
-        selectedCustomer?.customer_id === customer.customer_id ? null : customer
-      );
-    };
+  const handleCustomerClick = (customer) => {
+    setSelectedCustomer(
+      selectedCustomer?.customer_id === customer.customer_id ? null : customer
+    );
+  };
   
 
   const getElapsedTime = (createdAt) => {
@@ -912,6 +980,7 @@ function Dashboard() {
                 }              >
                 Checkout
               </button>
+
             ) : (
               <>
                 <button
@@ -927,6 +996,7 @@ function Dashboard() {
                                   >
                   Request Vehicle
                 </button>
+
                 <button
                   className="bg-[#2bca65] text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
@@ -940,6 +1010,7 @@ function Dashboard() {
                                   >
                   Care
                 </button>
+
                 <button
                   className="bg-purple-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
@@ -953,6 +1024,7 @@ function Dashboard() {
                                   >
                   Overnight
                 </button>
+
                 <button
                   className="bg-red-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
