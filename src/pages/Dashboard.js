@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, startTransition, useDeferredValue } from "react";
 import { FaWifi, FaDatabase, FaCog, FaTimesCircle } from "react-icons/fa";
 import "react-toastify/dist/ReactToastify.css";
 import { showToast } from "../utils/ui/showToast";
@@ -13,6 +13,15 @@ export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4
 
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
+// --- debounce hook (minimo) ---
+function useDebounced(value, delay = 200) {
+  const [v, setV] = React.useState(value);
+  React.useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
 
 function Dashboard() {
 
@@ -26,6 +35,9 @@ function Dashboard() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  // rende la ricerca più fluida
+  const debouncedSearch = useDebounced(searchQuery, 200);
+  const deferredSearch  = useDeferredValue(debouncedSearch);
   const [filterStatus, setFilterStatus] = useState("ALL");
   // Overnight list (separata dalla lista "today")
   const [overnights, setOvernights] = useState([]);
@@ -127,7 +139,7 @@ function Dashboard() {
     const list = todayCustomers
       .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
       .filter((c) => {
-        const s = (searchQuery || "").trim().toLowerCase();
+        const s = (deferredSearch || "").trim().toLowerCase();
 
         // 1) testo libero
         const textHit =
@@ -150,7 +162,7 @@ function Dashboard() {
 
     // ⛔️ NIENTE customSort qui: il sort lo facciamo sotto, in sortedCustomers
     return list;
-  }, [todayCustomers, searchQuery, filterStatus]);
+  }, [todayCustomers, deferredSearch, filterStatus]);
 
 
   const sortedCustomers = useMemo(() => {
@@ -811,7 +823,10 @@ function Dashboard() {
                 type="text"
                 placeholder="Search name, vehicle, tag, or last 4 digits…"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  startTransition(() => setSearchQuery(val)); // update non-urgente
+                }}
                 className="border p-2 rounded w-full pr-10"
               />
               {searchQuery && (
