@@ -11,7 +11,6 @@ import { useNavigate } from "react-router-dom";
 // Ordine di visualizzazione: più basso = più in alto nella dashboard
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
-const STATUS_ENDPOINT = "https://api.italinks.com/valet/update_customer_status.php";  
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
 
@@ -95,13 +94,13 @@ function Dashboard() {
   const refreshData = useCallback(async () => {
     try {
       const [resToday, resOver] = await Promise.all([
-        axios.post("https://api.italinks.com/valet/get_customers.php", { company_id, location_id, timeRange: "today" }),
-        axios.post("https://api.italinks.com/valet/get_overnights.php", { company_id, location_id }),
+        axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today" }),
+        axios.post("https://api.italinks.com/valet/get_overnights.php", { company_id: companyId, location_id: locationId }),
       ]);
       setCustomers(resToday.data?.customers ?? []);
       setOvernights(resOver.data?.customers ?? []);
     } catch (e) { showToast.error("Refresh failed"); }
-  }, [company_id, location_id]);
+  }, [companyId, locationId]);
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -190,24 +189,6 @@ function Dashboard() {
     end.setHours(4, 59, 59, 999);
     return entry >= start && entry <= end;
   }
-
-  /*
-  function sortByPriority(arr) {
-    return [...arr].sort((a, b) => {
-      const pa = statusPriority[a.status] ?? 99;
-      const pb = statusPriority[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
-
-      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
-      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
-
-      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-
-      return aNum - bNum;
-    });
-  }
-  */
 
 // handler per cambiare il tipo di sort
   function toggleSort(field) {
@@ -571,12 +552,10 @@ function Dashboard() {
     }
   
     try {
-      const location_id = locationId;
-
       const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
         customer_id: existingCustomer.customer_id,
         tag_number: parseInt(customerData.tag_number),
-        location_id,
+        location_id: locationId,
         company_id: companyId
       });
   
@@ -608,7 +587,7 @@ function Dashboard() {
       showToast.error("Customer not found");
       return;
     }
-    const prevStatus = current.status;
+    
 
     // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
     if (status === "OVERNIGHT") {
@@ -688,7 +667,7 @@ function Dashboard() {
                 updated.requested_at = c.requested_at || null;
               } else if (status === "OVERNIGHT") {
                 // di solito manteniamo requested_at (se esiste) o created_at guida il sort nella sezione overnight
-                updated.requested_at = c.requested_at || c.requested_at ?? null;
+                updated.requested_at = (c.requested_at ?? c.created_at) ?? null;
               }
 
               return updated;
@@ -722,7 +701,7 @@ function Dashboard() {
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
         setCustomers(snapshotCustomers);
         setOvernights(snapshotOvernights);
-        // opzionale: refreshData?.();
+        refreshData?.();
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
@@ -730,7 +709,7 @@ function Dashboard() {
       // ❌ rollback
       setCustomers(snapshotCustomers);
       setOvernights(snapshotOvernights);
-      // opzionale: refreshData?.();
+      refreshData?.();
     }
   };
 
