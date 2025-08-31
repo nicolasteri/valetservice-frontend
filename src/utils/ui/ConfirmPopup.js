@@ -60,14 +60,14 @@ export const showConfirmPopup = ({ icon = "", title, message, onConfirm, confirm
   });
 };
   // per STATUS CLIENTI
-export const confirmAndUpdatePopup = ({ customerId, status, label, updateStatus }) => {
+export const confirmAndUpdatePopup = ({ customerId, status, label, updateStatus, tag_number = null }) => {
   showConfirmPopup({
     icon: "🚗",
     title: `Change to "${label}"?`,
     message: "Confirm status update for this customer.",
     confirmText: "Yes, Update",
     confirmColor: "#2563eb",
-    onConfirm: () => updateStatus(customerId, status),
-  });
+    // passa tag_number se presente; altrimenti un oggetto vuoto (updateStatus gestisce il fallback)
+    onConfirm: () => updateStatus(customerId, status, tag_number ? { tag_number } : {}),  });
 };
 

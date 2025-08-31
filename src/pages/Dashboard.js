@@ -619,19 +619,27 @@ function Dashboard() {
     }
   };
   
+  const getRecordById = React.useCallback(
+    (id) =>
+      (customers ?? []).find((c) => c.customer_id === id) ||
+      (overnights ?? []).find((c) => c.customer_id === id) ||
+      null,
+    [customers, overnights]
+  );
+
   const updateStatus = async (customer_id, status, opts = {}) => {
-    // 🔎 stato corrente per rollback
+    // snapshot per rollback
     const snapshotCustomers = customers;
     const snapshotOvernights = overnights;
 
-    // tag_number: usa quello passato o quello del selectedCustomer
-    const tag_number = opts.tag_number ?? selectedCustomer?.tag_number ?? null;
+    // trova il record in customers OPPURE in overnights
+    const current = getRecordById(customer_id);
 
-    // trova il record corrente
-    const current = customers.find((c) => c.customer_id === customer_id);
-    if (!current) {
-      showToast.error("Customer not found");
-      return;
+    // tag_number necessario per l'API: passa quello dal caller, oppure quello nel record, oppure quello del selected
+    const tag_number = opts.tag_number ?? current?.tag_number ?? selectedCustomer?.tag_number ?? null;
+    if (!tag_number) {
+      // possiamo comunque tentare, ma avvisa che manca il tag (dipende dalle esigenze del backend)
+      console.warn("updateStatus: missing tag_number, proceeding anyway");
     }
     
 
@@ -648,8 +656,8 @@ function Dashboard() {
         )
       );
       setOvernights((prev) => {
-        const updated = { ...current, status: "OVERNIGHT", touchedAt: Date.now() };
-        const exists = prev.some((c) => c.customer_id === customer_id);
+        const base = current ?? { customer_id, tag_number };
+        const updated = { ...base, status: "OVERNIGHT", touchedAt: Date.now() };        const exists = prev.some((c) => c.customer_id === customer_id);
         return exists
           ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
           : [updated, ...prev];
@@ -724,7 +732,7 @@ function Dashboard() {
         // se è OVERNIGHT e non era già stato trattato in ottimistico (es. se in futuro togli l’ottimistico), aggiungilo
         if (status === "OVERNIGHT") {
           setOvernights((prev) => {
-            const updated = customers.find((c) => c.customer_id === customer_id) || current;
+            const updated = (customers ?? []).find((x) => x.customer_id === customer_id) || current || { customer_id, tag_number };            
             const exists = prev.some((c) => c.customer_id === customer_id);
             return exists
               ? prev.map((c) => (c.customer_id === customer_id ? { ...updated, status: "OVERNIGHT" } : c))
@@ -1000,6 +1008,7 @@ function Dashboard() {
           </div>
           <div className="flex justify-center items-center w-full sm:w-1/2 gap-10">
             {selectedCustomer.status === "OVERNIGHT" ? (
+
               <button
                 className="bg-red-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                 onClick={() =>
@@ -1008,6 +1017,7 @@ function Dashboard() {
                     status: "OUT",
                     label: "Checkout",
                     updateStatus,
+                    tag_number: selectedCustomer.tag_number,
                   })
                 }              >
                 Checkout
@@ -1023,6 +1033,7 @@ function Dashboard() {
                       status: "PENDING",
                       label: "Request Vehicle",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1037,6 +1048,7 @@ function Dashboard() {
                       status: "CARE",
                       label: "Care",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1051,6 +1063,7 @@ function Dashboard() {
                       status: "OVERNIGHT",
                       label: "Overnight",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1065,6 +1078,7 @@ function Dashboard() {
                       status: "OUT",
                       label: "Checkout",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1079,6 +1093,7 @@ function Dashboard() {
                       status: "IN",
                       label: "Repark",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
