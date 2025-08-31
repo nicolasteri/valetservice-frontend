@@ -105,14 +105,34 @@ function Dashboard() {
 
   const refreshData = useCallback(async () => {
     try {
+      setIsLoading(true); // 👈 loading solo qui, mai nella search
+
       const [resToday, resOver] = await Promise.all([
-        axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today" }),
-        axios.post("https://api.italinks.com/valet/get_overnights.php", { company_id: companyId, location_id: locationId }),
+        axios.post("https://api.italinks.com/valet/get_customers.php", {
+          company_id: companyId,
+          location_id: locationId,
+          timeRange: "today",
+        }),
+        axios.post("https://api.italinks.com/valet/get_overnights.php", {
+          company_id: companyId,
+          location_id: locationId,
+        }),
       ]);
+
       setCustomers(resToday.data?.customers ?? []);
       setOvernights(resOver.data?.customers ?? []);
-    } catch (e) { showToast.error("Refresh failed"); }
+    } catch (e) {
+      console.error("refreshData error:", e);
+      showToast.error("Refresh failed");
+    } finally {
+      setIsLoading(false); // 👈 sempre azzera alla fine
+    }
   }, [companyId, locationId]);
+  // refreshdata Starter useEffect ///////////
+  useEffect(() => {
+    refreshData();
+  }, [refreshData]);
+
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -746,13 +766,7 @@ function Dashboard() {
   };
 
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center items-center h-screen text-xl font-semibold text-gray-500">
-        Loading dashboard...
-      </div>
-    );
-  }
+ 
  //////////// !! START RETURN FINALE !! /////////////
   return (
     <div className="flex flex-col h-screen"> 
@@ -879,48 +893,58 @@ function Dashboard() {
 
 
         {/* MAIN CONTENT - CLIENTI ATTUALI */}
-        <div className="grid grid-cols-4 gap-4">
-          {sortedCustomers.map((customer) => {
-            const isSelected = selectedCustomer?.customer_id === customer.customer_id;
-            const isPending = customer.status === "PENDING";
-            const isCare = customer.status === "CARE";
-
-            let bgColor = "bg-gray-800"; // default per IN
-            if (isPending) bgColor = "bg-[#0c6cbc]";
-            else if (isCare) bgColor = "bg-[#2bca65]";
-
-            return (
-              <div
-                key={customer.customer_id}
-                className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
-                  ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
-                onClick={() => handleCustomerClick(customer)}
-              >
-                <div className="font-semibold">TAG #{customer.tag_number}</div>
-
-                {/* 🕒 Tempo dall'ingresso */}
-                <div className="text-xs text-gray-300 mt-1">
-                  🕒 Check-in: {getElapsedTime(customer.created_at)}
-                </div>
-
-                {/* ⏱ Tempo di attesa veicolo */}
-                {(isPending || isCare) && customer.requested_at && (
-                  <div className="text-xs text-yellow-300 font-semibold mt-1">
-                    ⏱ Wait: {formatElapsedTime(customer.requested_at)}
-                  </div>
-                )}
-
-                {/* ⚠️ Punto esclamativo se è pending */}
-                {isPending && (
-                  <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
-                    !
-                  </div>
-                )}
+        <div className="relative">
+          {/* Overlay: copre solo la griglia, non la search */}
+          {isLoading && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-sm">
+              <div className="text-xl font-semibold text-gray-500" aria-live="polite">
+                Loading dashboard...
               </div>
-            );
-          })}
-        </div>
+            </div>
+          )}
 
+          <div className="grid grid-cols-4 gap-4">
+            {sortedCustomers.map((customer) => {
+              const isSelected = selectedCustomer?.customer_id === customer.customer_id;
+              const isPending = customer.status === "PENDING";
+              const isCare = customer.status === "CARE";
+
+              let bgColor = "bg-gray-800"; // default per IN
+              if (isPending) bgColor = "bg-[#0c6cbc]";
+              else if (isCare) bgColor = "bg-[#2bca65]";
+
+              return (
+                <div
+                  key={customer.customer_id}
+                  className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
+                    ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
+                  onClick={() => handleCustomerClick(customer)}
+                >
+                  <div className="font-semibold">TAG #{customer.tag_number}</div>
+
+                  {/* 🕒 Tempo dall'ingresso */}
+                  <div className="text-xs text-gray-300 mt-1">
+                    🕒 Check-in: {getElapsedTime(customer.created_at)}
+                  </div>
+
+                  {/* ⏱ Tempo di attesa veicolo */}
+                  {(isPending || isCare) && customer.requested_at && (
+                    <div className="text-xs text-yellow-300 font-semibold mt-1">
+                      ⏱ Wait: {formatElapsedTime(customer.requested_at)}
+                    </div>
+                  )}
+
+                  {/* ⚠️ Punto esclamativo se è pending */}
+                  {isPending && (
+                    <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
+                      !
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
 
         {/* OVERNIGHT CUSTOMERS */}
         {overnights.length > 0 && (
