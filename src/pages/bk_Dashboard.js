@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback, startTransition, useDeferredValue } from "react";
 import { FaWifi, FaDatabase, FaCog, FaTimesCircle } from "react-icons/fa";
 import "react-toastify/dist/ReactToastify.css";
 import { showToast } from "../utils/ui/showToast";
@@ -8,19 +8,39 @@ import GoogleSheetShift from "../components/GoogleSheetShift";
 import { confirmAndUpdatePopup } from "../utils/ui/ConfirmPopup";
 import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
+// Ordine di visualizzazione: più basso = più in alto nella dashboard
+export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
-  const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
+const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
+// --- debounce hook (minimo) ---
+function useDebounced(value, delay = 200) {
+  const [v, setV] = React.useState(value);
+  React.useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
 
 function Dashboard() {
+
   const navigate = useNavigate();
+
+  // useState /////////////////////////
+
   const [isOnline, setIsOnline] = useState(() => (isBrowser ? navigator.onLine : true));
   const [dbConnected, setDbConnected] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  // rende la ricerca più fluida
+  const debouncedSearch = useDebounced(searchQuery, 200);
+  const deferredSearch  = useDeferredValue(debouncedSearch);
   const [filterStatus, setFilterStatus] = useState("ALL");
+  // Overnight list (separata dalla lista "today")
+  const [overnights, setOvernights] = useState([]);
   const [customerData, setCustomerData] = useState({
     first_name: "",
     last_name: "",
@@ -29,6 +49,201 @@ function Dashboard() {
     color: "",
     tag_number: "",
   });
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const [companyId, setCompanyId] = useState(() => {
+    const v = localStorage.getItem("company_id");
+    return v ? Number(v) : null;
+  });
+  const [locationId, setLocationId] = useState(() => {
+    const v = localStorage.getItem("location_id");
+    return v ? Number(v) : null;
+  });
+  const [locationName, setLocationName] = useState("");
+  const [customers, setCustomers] = useState([]);
+  const [existingCustomer, setExistingCustomer] = useState(null);
+  const [showExistingModal, setShowExistingModal] = useState(false);
+  const [highlightTag, setHighlightTag] = useState(false);
+  const [selectedSetting, setSelectedSetting] = useState(null);
+  // Blocco per login e controllo dati
+  const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
+  const [tagStatus, setTagStatus] = useState(null); // 'available' | 'unavailable' | null
+  const [checkingTag, setCheckingTag] = useState(false); // per gestire eventuale spinner
+  // SORT BY default: Arrival ↓ (più recenti in alto)
+  const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
+  const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
+
+  // callback & helpers /////////////////////////
+
+  /* funzione di ordinamento custom per "priority"
+   - Gruppi: PENDING -> CARE -> IN -> OVERNIGHT -> OUT
+   - Dentro al gruppo: FIFO (asc) oppure invertito (desc) in base a sortDir*/
+  const customSort = useCallback(
+    (list) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+
+      const toNum = (ts) => {
+        const d = parseMySQL(ts, /* assumeUTC? */ false);
+        return d ? d.getTime() : Number.POSITIVE_INFINITY;
+      };
+
+      const refTs = (c) =>
+        c.status === "IN" ? c.created_at : (c.requested_at ?? c.touchedAt);
+
+      return [...(list ?? [])].sort((a, b) => {
+        // 1) Ordine per gruppo (NON invertito da sortDir)
+        const pa = statusPriority[a.status] ?? 99;
+        const pb = statusPriority[b.status] ?? 99;
+        if (pa !== pb) return pa - pb;
+
+        // 2) Ordine interno al gruppo (invertibile con sortDir)
+        const ta = toNum(refTs(a));
+        const tb = toNum(refTs(b));
+        if (ta !== tb) return dir * (ta - tb);
+
+        // 3) Tie-breakers stabili per evitare flicker
+        const tna = (a.tag_number ?? 0) - (b.tag_number ?? 0);
+        if (tna !== 0) return tna;
+        return (a.customer_id ?? 0) - (b.customer_id ?? 0);
+      });
+    },
+    [sortDir]
+  );
+
+  const refreshData = useCallback(async () => {
+    try {
+      setIsLoading(true); // 👈 loading solo qui, mai nella search
+
+      const [resToday, resOver] = await Promise.all([
+        axios.post("https://api.italinks.com/valet/get_customers.php", {
+          company_id: companyId,
+          location_id: locationId,
+          timeRange: "today",
+        }),
+        axios.post("https://api.italinks.com/valet/get_overnights.php", {
+          company_id: companyId,
+          location_id: locationId,
+        }),
+      ]);
+
+      setCustomers(resToday.data?.customers ?? []);
+      setOvernights(resOver.data?.customers ?? []);
+    } catch (e) {
+      console.error("refreshData error:", e);
+      showToast.error("Refresh failed");
+    } finally {
+      setIsLoading(false); // 👈 sempre azzera alla fine
+    }
+  }, [companyId, locationId]);
+  // refreshdata Starter useEffect ///////////
+  useEffect(() => {
+    refreshData();
+  }, [refreshData]);
+
+
+  // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
+  const todayCustomers = useMemo(() => {
+    const list = customers ?? [];
+    return list.filter((c) => isToday(c.created_at));
+  }, [customers]);
+
+  const inToday = useMemo(() => todayCustomers.length, [todayCustomers]);
+
+  const nowCount = useMemo(
+    () => todayCustomers.filter((c) => ["IN", "PENDING", "CARE"].includes(c.status)).length,
+    [todayCustomers]
+  );
+
+  const outCount = useMemo(
+    () => todayCustomers.filter((c) => c.status === "OUT").length,
+    [todayCustomers]
+  );
+
+  const countOvernight = useMemo(() => overnights.length, [overnights]);
+
+
+  const filteredCustomers = useMemo(() => {
+    const list = todayCustomers
+      .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
+      .filter((c) => {
+        const s = (deferredSearch || "").trim().toLowerCase();
+
+        // 1) testo libero
+        const textHit =
+          (c.first_name    && c.first_name.toLowerCase().includes(s)) ||
+          (c.last_name     && c.last_name.toLowerCase().includes(s))  ||
+          (c.vehicle_model && c.vehicle_model.toLowerCase().includes(s)) ||
+          (c.color         && c.color.toLowerCase().includes(s)) ||
+          (c.tag_number    && String(c.tag_number).includes(s));
+
+        // 2) ultimi 4 telefono
+        const digits = s.replace(/\D/g, "");
+        const last4  = digits.length >= 4 ? digits.slice(-4) : null;
+        const phoneDigits = (c.phone_number || "").replace(/\D/g, "");
+        const phoneHit = last4 ? phoneDigits.endsWith(last4) : false;
+
+        const matchesSearch = s === "" ? true : (textHit || phoneHit);
+        const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+        return matchesSearch && matchesStatus;
+      });
+
+    // ⛔️ NIENTE customSort qui: il sort lo facciamo sotto, in sortedCustomers
+    return list;
+  }, [todayCustomers, deferredSearch, filterStatus]);
+
+
+  const sortedCustomers = useMemo(() => {
+    const list = filteredCustomers ?? customers;    
+    // per tutti gli altri casi ordina già il BACKEND, quindi restituiamo la lista così com’è
+    return sortField === "priority" ? customSort(list) : list;
+  }, [filteredCustomers, customers, sortField, customSort]);
+
+  function parseMySQL(ts, assumeUTC = false) { // --- TIME HELPERS ---
+    if (!ts || ts === '0000-00-00 00:00:00') return null;
+    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
+    const d = new Date(assumeUTC ? iso + 'Z' : iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatElapsedTime(timestamp) {
+    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
+
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
+
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
+  }
+
+  function isToday(createdAt) {
+    const entry = new Date(createdAt);
+    const now = new Date();
+    const start = new Date(now);
+    const end = new Date(now);
+    start.setHours(5, 0, 0, 0);
+    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
+    end.setDate(start.getDate() + 1);
+    end.setHours(4, 59, 59, 999);
+    return entry >= start && entry <= end;
+  }
+
+// handler per cambiare il tipo di sort
+  function toggleSort(field) {
+    if (field === "priority") {
+      if (sortField === "priority") {
+        // se clicchi di nuovo su "priority", inverte l'ordine dentro ai gruppi
+        setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+      } else {
+        // primo passaggio a "priority": default asc (FIFO)
+        setSortField("priority");
+        setSortDir("asc");
+      }
+      return;
+    }
+    // altri campi (ordinati dal backend o da altre logiche)
+    setSortField(field);
+  }
   const resetCustomerForm = () => {
     setCustomerData({
       first_name: "",
@@ -39,90 +254,120 @@ function Dashboard() {
       tag_number: "",
     });
   };
-  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  
+  const fetchCustomers = useCallback(async () => {
+    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
+      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
+      return;
+    }
 
+    const payload = {
+      location_id: locationId,
+      company_id: companyId,
+      ...(filterStatus !== "ALL" && { status: filterStatus }),
+      search: searchQuery,
+      timeRange: "today",
+      sortField,
+      sortDir,
+    };
+
+    // DEBUG opzionale
+    // console.log("📤 Sending filters:", payload);
+
+    try {
+      const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      setDbConnected(res.ok);
+
+      const data = await res.json();
+      if (data.success && Array.isArray(data.customers)) {
+        const prepared = data.customers.map((c) => ({
+          ...c,
+          touchedAt: c.touchedAt || c.created_at,
+        }));
+        // ❗️NON ordinare qui: ordina già il server (tranne "priority", che gestisci con useMemo)
+        setCustomers(prepared);
+      } else {
+        console.error("❌ Failed fetching customers:", data.error || data);
+      }
+    } catch (err) {
+      console.error("🔥 Fetch error:", err);
+      setDbConnected(false);
+    }
+  }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
+
+  const triggerOvernightUpdate = useCallback(async () => {
+    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
+      console.warn("⚠️ triggerOvernightUpdate aborted: missing locationId or companyId");
+      return;
+    }
+
+    try {
+      const res = await fetch("https://api.italinks.com/valet/update_overnight.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ company_id: companyId, location_id: locationId }),
+      });
+
+      // alcuni script PHP potrebbero non tornare JSON; non fallire se non riesci a fare res.json()
+      try {
+        const data = await res.json();
+        if (!data.success) console.warn("🌙 Overnight update: non-success", data.error);
+        // else console.log("🌙 Overnight updated:", data.count);
+      } catch {
+        // risposta non-JSON: va bene così (best-effort)
+      }
+    } catch (err) {
+      console.error("❌ Overnight update failed:", err);
+    }
+  }, [companyId, locationId]);
+
+  const fetchOvernights = useCallback(async () => {
+    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
+      console.warn("⚠️ fetchOvernights aborted: missing locationId or companyId");
+      return;
+    }
+
+    try {
+      const payload = {
+        location_id: locationId,
+        company_id: companyId,
+        timeRange: "overnight",
+        sortField: "arrival",
+        sortDir: "asc",
+      };
+
+      const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (data.success && Array.isArray(data.customers)) {
+        setOvernights(
+          data.customers.map((c) => ({
+            ...c,
+            touchedAt: c.touchedAt || c.created_at,
+          }))
+        );
+      } else {
+        console.warn("Overnight fetch failed:", data);
+      }
+    } catch (e) {
+      console.error("Overnight fetch error:", e);
+    }
+  }, [companyId, locationId]);
+
+  // useEffect /////////////////////////
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
     return () => clearInterval(id);
   }, []);
-
-  // --- TIME HELPERS ---
-  const parseMySQL = (ts, assumeUTC = false) => {
-    if (!ts || ts === '0000-00-00 00:00:00') return null;
-    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
-    const d = new Date(assumeUTC ? iso + 'Z' : iso);
-    return isNaN(d.getTime()) ? null : d;
-  };
-
-  const [companyId, setCompanyId] = useState(null);
-  const [locationId, setLocationId] = useState(null);
-  const [locationName, setLocationName] = useState("");
-  const [customers, setCustomers] = useState([]);
-  const [existingCustomer, setExistingCustomer] = useState(null);
-  const [showExistingModal, setShowExistingModal] = useState(false);
-  const [highlightTag, setHighlightTag] = useState(false);
-  const [selectedSetting, setSelectedSetting] = useState(null);
-
-  // Ordine di visualizzazione: più basso = più in alto nella dashboard
-  const statusPriority = { PENDING: 0, CARE: 0, IN: 1 };   // più basso = più importante
-
-  const sortByPriority = (arr) =>
-    [...arr].sort((a, b) => {
-      const pa = statusPriority[a.status] ?? 99;
-      const pb = statusPriority[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
-
-      // Secondary: FIFO per timestamp rilevante
-      const aRef = a.status === "IN" ? a.created_at : (a.requested_at ?? a.touchedAt);
-      const bRef = b.status === "IN" ? b.created_at : (b.requested_at ?? b.touchedAt);
-
-      const aNum = (() => { const d = parseMySQL(aRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-      const bNum = (() => { const d = parseMySQL(bRef, false); return d ? d.getTime() : Number.POSITIVE_INFINITY; })();
-
-      return aNum - bNum;
-    });
-
-
-  const formatElapsedTime = (timestamp) => {
-    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
-    if (!startDate) return "00h 00m";
-
-    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
-    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
-
-    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
-    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
-    return `${h}h ${m}m`;
-  };
-
-
-
-  // Funzione per ordinare e timer status PENDING e CARE 
-  const customSort = (customers) => {
-    const num = (ts) => {
-      const d = parseMySQL(ts, /* assumeUTC? */ false);
-      return d ? d.getTime() : Number.POSITIVE_INFINITY;
-    };
-
-    const pending = customers
-      .filter((c) => c.status === "PENDING")
-      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
-
-    const care = customers
-      .filter((c) => c.status === "CARE")
-      .sort((a, b) => num(a.requested_at) - num(b.requested_at));
-
-    const inside = customers
-      .filter((c) => c.status === "IN")
-      .sort((a, b) => num(a.created_at) - num(b.created_at));
-
-    return [...pending, ...care, ...inside];
-  };
-
-
-
-  // Blocco per login e controllo dati
-  const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
 
   useEffect(() => {
     const companyIdRaw = localStorage.getItem("company_id");
@@ -150,17 +395,20 @@ function Dashboard() {
   }, [navigate]);
 
   useEffect(() => {
-    if (
-      typeof companyId === "number" &&
-      typeof locationId === "number" &&
-      !isNaN(companyId) &&
-      !isNaN(locationId)
-    ) {
-      triggerOvernightUpdate();
-      fetchCustomers();
-      setIsLoading(false);
-    }
-  }, [companyId, locationId, filterStatus, searchQuery]);
+    let cancelled = false;
+    setIsLoading(true);
+
+    (async () => {
+      try {
+        await fetchCustomers();   // ← usa la callback
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [fetchCustomers]);   // ✅ SOLO la callback qui
+
 
  
   const handleOnline = () => setIsOnline(true);
@@ -192,85 +440,12 @@ function Dashboard() {
     }
   };
 
-  const fetchCustomers = () => {
-    if (!locationId || !companyId) {
-      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
-      return;
-    }
-
-    // DEBUG
-    console.log("📤 Sending filters:", {
-      location_id: locationId,
-      company_id: companyId,
-      status: filterStatus,
-      search: searchQuery,
-      timeRange: "today"
-    });
-
-    fetch("https://api.italinks.com/valet/get_customers.php", {
-      method: "POST",
-      headers: {"Content-Type": "application/json",},
-            // DOPO – niente field “status” se siamo in CLEAR-filter
-      body: JSON.stringify({
-        location_id: locationId,
-        company_id: companyId,
-        ...(filterStatus !== "ALL" && { status: filterStatus }), // <-- solo se diverso da ALL
-        search: searchQuery,
-        timeRange: "today"
-      }),
-
-    })
-      .then((res) => {
-        setDbConnected(res.ok);
-        return res.json();
-      })
-      .then((data) => {
-        if (data.success && data.customers) {
-
-          const prepared = data.customers.map((c) => ({
-            ...c,
-            touchedAt: c.touchedAt || c.created_at,  // se il back-end lo manda ok; altrimenti fallback
-          }));
-
-          setCustomers(sortByPriority(prepared));    // 👈 set già ordinato
-        } else {
-          console.error("❌ Failed fetching customers:", data.error || data);
-        }
-      })
-
-      .catch((err) => {
-        console.error("🔥 Fetch error:", err);
-        setDbConnected(false);
-      });
-  };
-
-  const triggerOvernightUpdate = () => {
-    if (!companyId || !locationId) {
-      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
-      return;
-    }
-
-    fetch("https://api.italinks.com/valet/update_overnight.php", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ company_id: companyId, location_id: locationId }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.success) {
-          console.error("🔥 Overnight update error:", data.error);
-        } else {
-          console.log("🌙 Overnight updated:", data.count);
-        }
-      })
-      .catch((err) => {
-        console.error("❌ Overnight fetch failed", err);
-      });
-  };
-
-
+  useEffect(() => {
+    (async () => {
+      await triggerOvernightUpdate();
+      await fetchOvernights();
+    })();
+  }, [triggerOvernightUpdate, fetchOvernights]);
   
 
   const handleChange = (e) => {
@@ -367,8 +542,6 @@ function Dashboard() {
     }
   };
 
-  const [tagStatus, setTagStatus] = useState(null); // 'available' | 'unavailable' | null
-  const [checkingTag, setCheckingTag] = useState(false); // per gestire eventuale spinner
 
 
   const checkTagAvailability = async () => {
@@ -408,8 +581,6 @@ function Dashboard() {
     setCheckingTag(false);
   };
 
-
-
   const handleUseExistingCustomer = async () => {
     if (!customerData.tag_number) {
       setHighlightTag(true);
@@ -419,12 +590,10 @@ function Dashboard() {
     }
   
     try {
-      const location_id = locationId;
-
       const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
         customer_id: existingCustomer.customer_id,
         tag_number: parseInt(customerData.tag_number),
-        location_id,
+        location_id: locationId,
         company_id: companyId
       });
   
@@ -442,9 +611,63 @@ function Dashboard() {
     }
   };
   
-  const updateStatus = async (customer_id, status) => {
+  const updateStatus = async (customer_id, status, opts = {}) => {
+    // 🔎 stato corrente per rollback
+    const snapshotCustomers = customers;
+    const snapshotOvernights = overnights;
+
+    // tag_number: usa quello passato o quello del selectedCustomer
+    const tag_number = opts.tag_number ?? selectedCustomer?.tag_number ?? null;
+
+    // trova il record corrente
+    const current = customers.find((c) => c.customer_id === customer_id);
+    if (!current) {
+      showToast.error("Customer not found");
+      return;
+    }
+    
+
+    // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
+    if (status === "OVERNIGHT") {
+      // toglilo dalle liste del giorno (i tuoi filtri escludono OVERNIGHT) e mettilo subito tra gli overnights
+      setCustomers((prev) =>
+        customSort(
+          prev.map((c) =>
+            c.customer_id === customer_id
+              ? { ...c, status: "OVERNIGHT", touchedAt: Date.now() }
+              : c
+          )
+        )
+      );
+      setOvernights((prev) => {
+        const updated = { ...current, status: "OVERNIGHT", touchedAt: Date.now() };
+        const exists = prev.some((c) => c.customer_id === customer_id);
+        return exists
+          ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
+          : [updated, ...prev];
+      });
+    } else if (status === "OUT") {
+      // segna OUT subito e rimuovilo dagli overnights se c’era
+      setCustomers((prev) =>
+        customSort(
+          prev.map((c) => {
+            if (c.customer_id !== customer_id) return c;
+            return {
+              ...c,
+              status: "OUT",
+              touchedAt: Date.now(),
+              // conserva requested_at per analisi
+              requested_at: c.requested_at || null,
+            };
+          })
+        )
+      );
+      setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
+    }
+
     try {
-      const response = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
+      // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
+      const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -452,17 +675,16 @@ function Dashboard() {
           status,
           company_id: companyId,
           location_id: locationId,
-          tag_number: selectedCustomer?.tag_number || null,
+          tag_number,
         }),
       });
 
-      const data = await response.json();
+      const data = await res.json();
 
       if (data.success) {
-        showToast.success("Status updated to " + status);
-
+        // ✅ 3) Allinea lo stato locale per tutti i casi (PENDING, CARE, IN inclusi)
         setCustomers((prev) =>
-          sortByPriority(
+          customSort(
             prev.map((c) => {
               if (c.customer_id !== customer_id) return c;
 
@@ -472,24 +694,18 @@ function Dashboard() {
                 touchedAt: Date.now(),
               };
 
-              // ⏱ Se status diventa PENDING → parte il timer
+              // regole timer/fields come prima
               if (status === "PENDING") {
                 updated.requested_at = new Date().toISOString();
-              }
-
-              // ➕ Se status diventa CARE → conserva il requested_at esistente
-              else if (status === "CARE") {
+              } else if (status === "CARE") {
                 updated.requested_at = c.requested_at || null;
-              }
-
-              // 🧼 Se torna a IN → azzera il timer
-              else if (status === "IN") {
+              } else if (status === "IN") {
                 updated.requested_at = null;
-              }
-
-              // ✅ Se OUT → conserva requested_at per analisi
-              else if (status === "OUT") {
+              } else if (status === "OUT") {
                 updated.requested_at = c.requested_at || null;
+              } else if (status === "OVERNIGHT") {
+                // di solito manteniamo requested_at (se esiste) o created_at guida il sort nella sezione overnight
+                updated.requested_at = (c.requested_at ?? c.created_at) ?? null;
               }
 
               return updated;
@@ -497,35 +713,51 @@ function Dashboard() {
           )
         );
 
+        // se è OVERNIGHT e non era già stato trattato in ottimistico (es. se in futuro togli l’ottimistico), aggiungilo
+        if (status === "OVERNIGHT") {
+          setOvernights((prev) => {
+            const updated = customers.find((c) => c.customer_id === customer_id) || current;
+            const exists = prev.some((c) => c.customer_id === customer_id);
+            return exists
+              ? prev.map((c) => (c.customer_id === customer_id ? { ...updated, status: "OVERNIGHT" } : c))
+              : [{ ...updated, status: "OVERNIGHT" }, ...prev];
+          });
+        }
+
+        showToast.success(
+          status === "OVERNIGHT"
+            ? "Marked OVERNIGHT"
+            : status === "OUT"
+            ? "Checkout completed"
+            : `Status updated to ${status}`
+        );
+
+        // chiudi eventuale popup
         setSelectedCustomer(null);
       } else {
-        showToast.error("Status update failed: " + data.error);
+        // ❌ rollback
+        showToast.error("Status update failed: " + (data.error || "Unknown error"));
+        setCustomers(snapshotCustomers);
+        setOvernights(snapshotOvernights);
+        refreshData?.();
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
       showToast.error("An error occurred while updating status.");
+      // ❌ rollback
+      setCustomers(snapshotCustomers);
+      setOvernights(snapshotOvernights);
+      refreshData?.();
     }
   };
 
  
-    const handleCustomerClick = (customer) => {
-      setSelectedCustomer(
-        selectedCustomer?.customer_id === customer.customer_id ? null : customer
-      );
-    };
-  
-
-  const isToday = (createdAt) => {
-    const entry = new Date(createdAt);
-    const now = new Date();
-    const start = new Date(now);
-    const end = new Date(now);
-    start.setHours(5, 0, 0, 0);
-    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
-    end.setDate(start.getDate() + 1);
-    end.setHours(4, 59, 59, 999);
-    return entry >= start && entry <= end;
+  const handleCustomerClick = (customer) => {
+    setSelectedCustomer(
+      selectedCustomer?.customer_id === customer.customer_id ? null : customer
+    );
   };
+  
 
   const getElapsedTime = (createdAt) => {
     const startDate = parseMySQL(createdAt, /* assumeUTC? */ false);
@@ -540,178 +772,192 @@ function Dashboard() {
   };
 
 
-  const todayCustomers = customers.filter(c => isToday(c.created_at));
-  const inToday = todayCustomers.length;
-  const nowCount = todayCustomers.filter(c => ["IN", "PENDING", "CARE"].includes(c.status)).length;
-  const outCount = todayCustomers.filter(c => c.status === "OUT").length;
-  const overnightCustomers = customers.filter(c => c.status === "OVERNIGHT");
-  const countOvernight = overnightCustomers.length;
-
-  const filteredCustomers = sortByPriority(todayCustomers   
-      .filter(c => !["OUT", "OVERNIGHT"].includes(c.status))
-      .filter((c) => {
-        const search = searchQuery.toLowerCase();
-        const matchesSearch =
-          c.first_name.toLowerCase().includes(search) ||
-          c.last_name.toLowerCase().includes(search) ||
-          c.phone_number.includes(search) ||
-          (c.tag_number && c.tag_number.toString().includes(search));
-        const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
-        return matchesSearch && matchesStatus;
-      })
-  );
-
-
-  if (isLoading) {
-    return (
-      <div className="flex justify-center items-center h-screen text-xl font-semibold text-gray-500">
-        Loading dashboard...
-      </div>
-    );
-  }
-
+ 
+ //////////// !! START RETURN FINALE !! /////////////
   return (
-    <div className="flex flex-col h-screen">
-      
+    <div className="flex flex-col h-screen"> 
+  
+
       {/* NAV BAR */}
-  <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
+        <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
 
-  {/* Nome + Icone connessione */}
-  <div className="flex items-center gap-3">
-    <div className="text-lg font-semibold text-gray-800">
-      {locationName || "Valet Dashboard"}
-    </div>
-    <div className="flex items-center gap-2">
-      <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
-      <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
-    </div>
-  </div>
-
-  {/* Contatori */}
-  <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-    <div className="text-black-600">TOT: {inToday}</div>
-    <div className="text-black-600">NOW: {nowCount}</div>
-    <div className="text-black-600">OUT: {outCount}</div>
-
-    {countOvernight > 0 && (
-      <div className="text-black-600">OVN: {countOvernight}</div>
-    )}
-  </div>
-
-  {/* Bottone impostazioni */}
-  <button onClick={() => setShowSettingsModal(true)}>
-    <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
-  </button>
-
-  </div>
-
-
-      {/* TOP BAR */}
-<div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
-  <div className="flex flex-wrap justify-between items-center gap-3">
-
-    {/* Dropdown stato + etichetta attiva */}
-    <div className="flex flex-col">
-      <select
-        value={filterStatus}
-        onChange={(e) => setFilterStatus(e.target.value)}
-        className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
-      >
-        <option value="ALL">🔍 CLEAR Filter</option>
-        <option value="IN">🟢 IN</option>
-        <option value="PENDING">🟡 PENDING</option>
-        <option value="CARE">🟣 CARE</option>
-        <option value="OUT">🔴 OUT</option>
-        <option value="OVERNIGHT">🌙 OVERNIGHT</option>
-      </select>
-
-      {filterStatus !== "ALL" && (
-        <span className="text-sm text-gray-600 italic mt-1 ml-1">
-          Filter: {filterStatus}
-        </span>
-      )}
-    </div>
-
-    {/* Barra di ricerca */}
-    <div className="relative flex-1 min-w-[200px]">
-      <input
-        type="text"
-        placeholder="Search by name, phone, or tag..."
-        value={searchQuery}
-        onChange={(e) => setSearchQuery(e.target.value)}
-        className="border p-2 rounded w-full pr-10"
-      />
-      {searchQuery && (
-        <FaTimesCircle
-          className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
-          onClick={handleClearSearch}
-        />
-      )}
-    </div>
-
-    {/* Pulsante Add */}
-    <button
-      onClick={() => setShowFormModal(true)}
-      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
-    >
-      <span>Add</span>
-      <span>Customer</span>
-      </button>
-    </div>
-  </div>
-
-
-
-  {/* MAIN CONTENT - CLIENTI ATTUALI */}
-  <div className="grid grid-cols-4 gap-4">
-    {customSort(filteredCustomers).map((customer) => {
-      const isSelected = selectedCustomer?.customer_id === customer.customer_id;
-      const isPending = customer.status === "PENDING";
-      const isCare = customer.status === "CARE";
-
-      let bgColor = "bg-gray-800"; // default per IN
-      if (isPending) bgColor = "bg-[#0c6cbc]";
-      else if (isCare) bgColor = "bg-[#2bca65]";
-
-      return (
-        <div
-          key={customer.customer_id}
-          className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
-            ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
-          onClick={() => handleCustomerClick(customer)}
-        >
-          <div className="font-semibold">TAG #{customer.tag_number}</div>
-
-          {/* 🕒 Tempo dall'ingresso */}
-          <div className="text-xs text-gray-300 mt-1">
-            🕒 Check-in: {getElapsedTime(customer.created_at)}
+          {/* Nome + Icone connessione */}
+          <div className="flex items-center gap-3">
+            <div className="text-lg font-semibold text-gray-800">
+              {locationName || "Valet Dashboard"}
+            </div>
+            <div className="flex items-center gap-2">
+              <FaWifi className={`text-2xl ${isOnline ? "text-green-500" : "text-red-500"}`} />
+              <FaDatabase className={`text-2xl ${dbConnected ? "text-green-500" : "text-red-500"}`} />
+            </div>
           </div>
 
-          {/* ⏱ Tempo di attesa veicolo */}
-          {(isPending || isCare) && customer.requested_at && (
-            <div className="text-xs text-yellow-300 font-semibold mt-1">
-              ⏱ Wait: {formatElapsedTime(customer.requested_at)}
-            </div>
-          )}
+          {/* Contatori */}
+          <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
+            <div className="text-black-600">TOT: {inToday}</div>
+            <div className="text-black-600">NOW: {nowCount}</div>
+            <div className="text-black-600">OUT: {outCount}</div>
 
-          {/* ⚠️ Punto esclamativo se è pending */}
-          {isPending && (
-            <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
-              !
-            </div>
-          )}
+            {countOvernight > 0 && (
+              <div className="text-black-600">OVN: {countOvernight}</div>
+            )}
+          </div>
+
+          {/* Bottone impostazioni */}
+          <button onClick={() => setShowSettingsModal(true)}>
+            <FaCog className="text-2xl text-gray-500 hover:text-gray-700" title="Settings" />
+          </button>
+
         </div>
-      );
-    })}
-  </div>
 
+
+        {/* TOP BAR */}
+        <div className={`p-4 shadow-sm z-10 flex flex-col gap-2 ${filterStatus !== "ALL" ? "bg-yellow-50" : "bg-gray-50"}`}>
+          <div className="flex flex-wrap justify-between items-center gap-3">
+
+            {/* Dropdown stato + etichetta attiva */}
+            <div className="flex flex-col">
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm focus:outline-none"
+              >
+                <option value="ALL">🔍 CLEAR Filter</option>
+                <option value="IN">🟢 IN</option>
+                <option value="PENDING">🟡 PENDING</option>
+                <option value="CARE">🟣 CARE</option>
+                <option value="OUT">🔴 OUT</option>
+                <option value="OVERNIGHT">🌙 OVERNIGHT</option>
+              </select>
+
+              {filterStatus !== "ALL" && (
+                <span className="text-sm text-gray-600 italic mt-1 ml-1">
+                  Filter: {filterStatus}
+                </span>
+              )}
+            </div>
+
+            {/* Barra di ricerca */}
+            <div className="relative flex-1 min-w-[200px]">
+              <input
+                type="text"
+                placeholder="Search name, vehicle, tag, or last 4 digits…"
+                value={searchQuery}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  startTransition(() => setSearchQuery(val)); // update non-urgente
+                }}
+                className="border p-2 rounded w-full pr-10"
+              />
+              {searchQuery && (
+                <FaTimesCircle
+                  className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-red-500 cursor-pointer"
+                  onClick={handleClearSearch}
+                />
+              )}
+            </div>
+
+            {/* SORT BY (variante compatta) */}
+            <div className="flex items-center gap-2 basis-full md:basis-auto order-last md:order-none">
+              <span className="text-sm font-medium">Sort:</span>
+
+              <select
+                value={sortField}
+                onChange={(e) => toggleSort(e.target.value)}
+                className="border border-gray-300 rounded px-3 py-2 bg-white text-sm shadow-sm"
+              >
+                <option value="priority">Priority</option>
+                <option value="number">Number</option>
+                <option value="arrival">Arrival</option>
+                <option value="urgency">Urgency</option>
+                <option value="name">Name</option>
+              </select>
+
+              {sortField !== "priority" && (
+                <button
+                  onClick={() => setSortDir(d => (d === "asc" ? "desc" : "asc"))}
+                  className="px-3 py-2 rounded bg-gray-200 text-sm hover:bg-gray-300"
+                  title={`Direction: ${sortDir}`}
+                >
+                  {sortDir === "asc" ? "↑" : "↓"}
+                </button>
+              )}
+            </div>
+
+            {/* Pulsante Add */}
+            <button
+              onClick={() => setShowFormModal(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded shadow text-sm h-[45px] w-[90px] flex flex-col items-center justify-center text-center"
+            >
+              <span>Add</span>
+              <span>Customer</span>
+            </button>
+          </div>
+        </div>
+
+
+
+
+        {/* MAIN CONTENT - CLIENTI ATTUALI */}
+        <div className="relative">
+          {/* Overlay: copre solo la griglia, non la search */}
+          {isLoading && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-sm">
+              <div className="text-xl font-semibold text-gray-500" aria-live="polite">
+                Loading dashboard...
+              </div>
+            </div>
+          )}
+
+          <div className="grid grid-cols-4 gap-4">
+            {sortedCustomers.map((customer) => {
+              const isSelected = selectedCustomer?.customer_id === customer.customer_id;
+              const isPending = customer.status === "PENDING";
+              const isCare = customer.status === "CARE";
+
+              let bgColor = "bg-gray-800"; // default per IN
+              if (isPending) bgColor = "bg-[#0c6cbc]";
+              else if (isCare) bgColor = "bg-[#2bca65]";
+
+              return (
+                <div
+                  key={customer.customer_id}
+                  className={`relative text-white p-4 rounded cursor-pointer border-2 transition-all duration-200
+                    ${bgColor} ${isSelected ? 'border-blue-500 shadow-lg' : 'border-transparent'}`}
+                  onClick={() => handleCustomerClick(customer)}
+                >
+                  <div className="font-semibold">TAG #{customer.tag_number}</div>
+
+                  {/* 🕒 Tempo dall'ingresso */}
+                  <div className="text-xs text-gray-300 mt-1">
+                    🕒 Check-in: {getElapsedTime(customer.created_at)}
+                  </div>
+
+                  {/* ⏱ Tempo di attesa veicolo */}
+                  {(isPending || isCare) && customer.requested_at && (
+                    <div className="text-xs text-yellow-300 font-semibold mt-1">
+                      ⏱ Wait: {formatElapsedTime(customer.requested_at)}
+                    </div>
+                  )}
+
+                  {/* ⚠️ Punto esclamativo se è pending */}
+                  {isPending && (
+                    <div className="absolute top-1 right-2 text-yellow-300 text-xl font-bold animate-pulse">
+                      !
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
 
         {/* OVERNIGHT CUSTOMERS */}
-        {overnightCustomers.length > 0 && (
+        {overnights.length > 0 && (
           <div className="mt-6">
             <h3 className="text-lg font-semibold text-purple-700 mb-2">Overnight Vehicles</h3>
             <div className="grid grid-cols-4 gap-4">
-            {overnightCustomers.map((customer) => {
+            {overnights.map((customer) => {
               const isSelected = selectedCustomer?.customer_id === customer.customer_id;
 
               return (
@@ -758,6 +1004,7 @@ function Dashboard() {
                 }              >
                 Checkout
               </button>
+
             ) : (
               <>
                 <button
@@ -773,6 +1020,7 @@ function Dashboard() {
                                   >
                   Request Vehicle
                 </button>
+
                 <button
                   className="bg-[#2bca65] text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
@@ -786,6 +1034,7 @@ function Dashboard() {
                                   >
                   Care
                 </button>
+
                 <button
                   className="bg-purple-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>
@@ -799,6 +1048,7 @@ function Dashboard() {
                                   >
                   Overnight
                 </button>
+
                 <button
                   className="bg-red-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                   onClick={() =>

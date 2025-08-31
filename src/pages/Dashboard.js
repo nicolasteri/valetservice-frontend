@@ -50,8 +50,14 @@ function Dashboard() {
     tag_number: "",
   });
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const [companyId, setCompanyId] = useState(null);
-  const [locationId, setLocationId] = useState(null);
+  const [companyId, setCompanyId] = useState(() => {
+    const v = localStorage.getItem("company_id");
+    return v ? Number(v) : null;
+  });
+  const [locationId, setLocationId] = useState(() => {
+    const v = localStorage.getItem("location_id");
+    return v ? Number(v) : null;
+  });
   const [locationName, setLocationName] = useState("");
   const [customers, setCustomers] = useState([]);
   const [existingCustomer, setExistingCustomer] = useState(null);
@@ -104,34 +110,42 @@ function Dashboard() {
   );
 
   const refreshData = useCallback(async () => {
+    // evita chiamate inutili se gli ID non sono pronti
+    if (!companyId || !locationId) {
+      console.warn("refreshData aborted: missing companyId or locationId");
+      return;
+    }
+
     try {
-      setIsLoading(true); // 👈 loading solo qui, mai nella search
+      setIsLoading(true);
 
-      const [resToday, resOver] = await Promise.all([
-        axios.post("https://api.italinks.com/valet/get_customers.php", {
-          company_id: companyId,
-          location_id: locationId,
-          timeRange: "today",
-        }),
-        axios.post("https://api.italinks.com/valet/get_overnights.php", {
-          company_id: companyId,
-          location_id: locationId,
-        }),
-      ]);
+      // ✅ usa solo get_customers.php (niente CORS su get_overnights.php)
+      const resToday = await axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        timeRange: "today",
+      });
 
-      setCustomers(resToday.data?.customers ?? []);
-      setOvernights(resOver.data?.customers ?? []);
+      const today = resToday.data?.customers ?? [];
+      setCustomers(today);
+
+      // Deriva gli overnight lato client (finché il CORS non è fixato)
+      setOvernights(today.filter(c => c.status === "OVERNIGHT"));
     } catch (e) {
       console.error("refreshData error:", e);
       showToast.error("Refresh failed");
     } finally {
-      setIsLoading(false); // 👈 sempre azzera alla fine
+      setIsLoading(false);
     }
   }, [companyId, locationId]);
+
   // refreshdata Starter useEffect ///////////
   useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+    if (companyId && locationId) {
+      refreshData();
+    }
+  }, [companyId, locationId, refreshData]);
+
 
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
