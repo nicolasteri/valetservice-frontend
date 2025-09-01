@@ -72,6 +72,22 @@ function Dashboard() {
   const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
   const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
 
+  // Contatori ricevuti dal server (con fallback)
+  const [countersLive, setCountersLive] = React.useState({
+    nowCount: 0,
+    outCount: 0,
+    totalToday: 0,
+    overnightCount: 0,
+  });
+
+  // Evita flash/zeri durante i refresh
+  const lastCountersRef = React.useRef(countersLive);
+  React.useEffect(() => {
+    if (!isLoading) lastCountersRef.current = countersLive;
+  }, [isLoading, countersLive]);
+
+  const counters = isLoading ? lastCountersRef.current : countersLive;
+
   // callback & helpers /////////////////////////
 
   /* funzione di ordinamento custom per "priority"
@@ -130,7 +146,31 @@ function Dashboard() {
       setCustomers(today);
 
       // Deriva gli overnight lato client (finché il CORS non è fixato)
-      setOvernights(today.filter(c => c.status === "OVERNIGHT"));
+      const over = (today.filter(c => c.status === "OVERNIGHT"));
+      setOvernights(over);
+      
+      // === CONTATORI SOLO OGGI (come richiesto) ===
+      const inCount      = today.filter((c) => c.status === "IN").length;
+      const pendingCount = today.filter((c) => c.status === "PENDING").length;
+      const careCount    = today.filter((c) => c.status === "CARE").length;
+      const outCount     = today.filter((c) => c.status === "OUT").length;
+
+      // A) totalToday = IN + PENDING + CARE + OUT (ESCLUDE OVERNIGHT)
+      const totalToday   = inCount + pendingCount + careCount + outCount;
+
+      // B) nowCount = IN + PENDING + CARE (solo oggi)
+      const nowCount     = inCount + pendingCount + careCount;
+
+      // C) overnightCount = numero di OVERNIGHT presenti nel payload odierno
+      const overnightCount = over.length;
+
+      setCountersLive({
+        nowCount,
+        outCount,
+        totalToday,
+        overnightCount,
+      });
+
     } catch (e) {
       console.error("refreshData error:", e);
       showToast.error("Refresh failed");
@@ -153,21 +193,6 @@ function Dashboard() {
     const list = customers ?? [];
     return list.filter((c) => isToday(c.created_at));
   }, [customers]);
-
-  const inToday = useMemo(() => todayCustomers.length, [todayCustomers]);
-
-  const nowCount = useMemo(
-    () => todayCustomers.filter((c) => ["IN", "PENDING", "CARE"].includes(c.status)).length,
-    [todayCustomers]
-  );
-
-  const outCount = useMemo(
-    () => todayCustomers.filter((c) => c.status === "OUT").length,
-    [todayCustomers]
-  );
-
-  const countOvernight = useMemo(() => overnights.length, [overnights]);
-
 
   const filteredCustomers = useMemo(() => {
     const list = todayCustomers
@@ -194,7 +219,6 @@ function Dashboard() {
         return matchesSearch && matchesStatus;
       });
 
-    // ⛔️ NIENTE customSort qui: il sort lo facciamo sotto, in sortedCustomers
     return list;
   }, [todayCustomers, deferredSearch, filterStatus]);
 
@@ -810,14 +834,15 @@ function Dashboard() {
 
           {/* Contatori */}
           <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-            <div className="text-black-600">TOT: {inToday}</div>
-            <div className="text-black-600">NOW: {nowCount}</div>
-            <div className="text-black-600">OUT: {outCount}</div>
+            <div className="text-black-600">TOT: {counters.totalToday}</div>
+            <div className="text-black-600">NOW: {counters.nowCount}</div>
+            <div className="text-black-600">OUT: {counters.outCount}</div>
 
-            {countOvernight > 0 && (
-              <div className="text-black-600">OVN: {countOvernight}</div>
+            {counters.overnightCount > 0 && (
+              <div className="text-black-600">OVN: {counters.overnightCount}</div>
             )}
           </div>
+
 
           {/* Bottone impostazioni */}
           <button onClick={() => setShowSettingsModal(true)}>
