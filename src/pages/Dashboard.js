@@ -126,7 +126,6 @@ function Dashboard() {
   );
 
   const refreshData = useCallback(async () => {
-    // evita chiamate inutili se gli ID non sono pronti
     if (!companyId || !locationId) {
       console.warn("refreshData aborted: missing companyId or locationId");
       return;
@@ -135,41 +134,43 @@ function Dashboard() {
     try {
       setIsLoading(true);
 
-      // ✅ usa solo get_customers.php (niente CORS su get_overnights.php)
-      const resToday = await axios.post("https://api.italinks.com/valet/get_customers.php", {
+      // 1) OGGI: per NOW / OUT / TOT
+      const todayReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
-        timeRange: "today",
+        timeRange: "today", // il backend applica la tua regola (es. 05:00→04:59)
       });
+
+      // 2) OVERNIGHT (senza limite di data)
+      //    - Proviamo con status="OVERNIGHT"
+      //    - Se il backend supporta "timeRange: 'all'", lo includiamo (harmless se ignorato)
+      const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        status: "OVERNIGHT",
+        timeRange: "all", // se non supportato, il backend lo ignora; se serve, puoi rimuoverlo
+      });
+
+      const [resToday, resOver] = await Promise.all([todayReq, overnightReq]);
 
       const today = resToday.data?.customers ?? [];
+      const over  = resOver.data?.customers ?? [];
+
+      // —— Griglie/listati ——
       setCustomers(today);
-
-      // Deriva gli overnight lato client (finché il CORS non è fixato)
-      const over = (today.filter(c => c.status === "OVERNIGHT"));
       setOvernights(over);
-      
-      // === CONTATORI SOLO OGGI (come richiesto) ===
-      const inCount      = today.filter((c) => c.status === "IN").length;
-      const pendingCount = today.filter((c) => c.status === "PENDING").length;
-      const careCount    = today.filter((c) => c.status === "CARE").length;
-      const outCount     = today.filter((c) => c.status === "OUT").length;
 
-      // A) totalToday = IN + PENDING + CARE + OUT (ESCLUDE OVERNIGHT)
-      const totalToday   = inCount + pendingCount + careCount + outCount;
+      // —— CONTATORI come da specifica ——
+      const inCount      = today.filter(c => c.status === "IN").length;
+      const pendingCount = today.filter(c => c.status === "PENDING").length;
+      const careCount    = today.filter(c => c.status === "CARE").length;
+      const outCount     = today.filter(c => c.status === "OUT").length;
 
-      // B) nowCount = IN + PENDING + CARE (solo oggi)
-      const nowCount     = inCount + pendingCount + careCount;
+      const totalToday   = inCount + pendingCount + careCount + outCount; // (IN+PENDING+CARE+OUT) solo oggi
+      const nowCount     = inCount + pendingCount + careCount;            // (IN+PENDING+CARE) solo oggi
+      const overnightCount = over.length;                                 // OVERNIGHT senza limite di data
 
-      // C) overnightCount = numero di OVERNIGHT presenti nel payload odierno
-      const overnightCount = over.length;
-
-      setCountersLive({
-        nowCount,
-        outCount,
-        totalToday,
-        overnightCount,
-      });
+      setCountersLive({ nowCount, outCount, totalToday, overnightCount });
 
     } catch (e) {
       console.error("refreshData error:", e);
@@ -178,6 +179,7 @@ function Dashboard() {
       setIsLoading(false);
     }
   }, [companyId, locationId]);
+
 
   // refreshdata Starter useEffect ///////////
   useEffect(() => {
