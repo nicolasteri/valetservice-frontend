@@ -166,7 +166,7 @@ function Dashboard() {
       const careCount    = today.filter(c => c.status === "CARE").length;
       const outCount     = today.filter(c => c.status === "OUT").length;
 
-      const totalToday   = inCount + pendingCount + careCount + outCount; // (IN+PENDING+CARE+OUT) solo oggi
+      const totalToday   = today.length;                           // totale OGGI (tutti gli stati)
       const nowCount     = inCount + pendingCount + careCount;            // (IN+PENDING+CARE) solo oggi
       const overnightCount = over.length;                                 // OVERNIGHT senza limite di data
 
@@ -262,7 +262,7 @@ function Dashboard() {
     return entry >= start && entry <= end;
   }
 
-// handler per cambiare il tipo di sort
+  // handler per cambiare il tipo di sort
   function toggleSort(field) {
     if (field === "priority") {
       if (sortField === "priority") {
@@ -503,19 +503,19 @@ function Dashboard() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-  
+
     if (!customerData.tag_number) {
       setHighlightTag(true);
       showToast.error("Insert Tag Number!");
       setTimeout(() => setHighlightTag(false), 1500);
       return;
     }
-  
+
     try {
       const company_id = companyId;
       const location_id = locationId;
-  
-      // 🔍 Controlla se il cliente esiste già per questa company
+
+      // 🔍 Check se il cliente esiste già per questa company
       const responseCheck = await axios.post(
         "https://api.italinks.com/valet/check_phone.php",
         {
@@ -523,29 +523,52 @@ function Dashboard() {
           company_id,
         }
       );
-  
+
       if (responseCheck.data.success && responseCheck.data.exists) {
-        // ✅ Cliente già registrato: crea solo record e aggiorna tag
+        // ✅ Cliente già registrato: crea record odierno e aggiorna tag
         const customer_id = responseCheck.data.customer.customer_id;
-  
+
         const responseAdd = await axios.post(
           "https://api.italinks.com/valet/add_existing_customer.php",
           {
             customer_id,
-            tag_number: parseInt(customerData.tag_number),
+            tag_number: parseInt(customerData.tag_number, 10),
             location_id,
+            company_id,
           }
         );
-  
+
         if (responseAdd.data.success) {
+          // Proviamo a prendere il record creato dal backend; altrimenti sintetizziamo
+          const created =
+            responseAdd.data.customer ??
+            {
+              customer_id:
+                responseAdd.data.customer_id ??
+                customer_id ??
+                Date.now(), // fallback id locale
+              tag_number: Number(customerData.tag_number),
+              status: "IN", // di solito all'ingresso è IN
+              first_name: responseCheck.data.customer.first_name || "",
+              last_name: responseCheck.data.customer.last_name || "",
+              phone_number: customerData.phone_number,
+              vehicle_model: responseCheck.data.customer.vehicle_model || "",
+              color: responseCheck.data.customer.color || "",
+              created_at: new Date().toISOString(),
+            };
+
+          // 🔵 Ottimistico: subito su lista + contatori
+          onNewCustomerCreated(created);
+
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
           resetCustomerForm();
-          fetchCustomers();
+
+          // 🔄 Riallinea con il DB (contatori inclusi)
+          await refreshData();
         } else {
           showToast.error("Error: " + responseAdd.data.error);
         }
-  
       } else {
         // ✅ Cliente nuovo: registra tutto
         const payload = {
@@ -553,28 +576,52 @@ function Dashboard() {
           company_id,
           location_id,
         };
-  
-        const responseNew = await fetch("https://api.italinks.com/valet/add_customers.php", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-  
+
+        const responseNew = await fetch(
+          "https://api.italinks.com/valet/add_customers.php",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+
         const dataNew = await responseNew.json();
-  
+
         if (dataNew.success) {
+          const created =
+            dataNew.customer ??
+            {
+              customer_id: dataNew.customer_id ?? Date.now(),
+              tag_number: Number(customerData.tag_number),
+              status: "IN", // tipicamente all'ingresso
+              first_name: customerData.first_name || "",
+              last_name: customerData.last_name || "",
+              phone_number: customerData.phone_number,
+              vehicle_model: customerData.vehicle_model || "",
+              color: customerData.color || "",
+              created_at: new Date().toISOString(),
+            };
+
+          // 🔵 Ottimistico
+          onNewCustomerCreated(created);
+
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
           resetCustomerForm();
-          fetchCustomers();
+
+          // 🔄 Riallinea con il DB
+          await refreshData();
         } else {
           showToast.error("Error: " + dataNew.error);
         }
       }
     } catch (error) {
+      console.error("handleSubmit error:", error);
       showToast.error("Connection error");
     }
   };
+
 
 
 
@@ -622,25 +669,51 @@ function Dashboard() {
       setTimeout(() => setHighlightTag(false), 1500);
       return;
     }
-  
+
     try {
-      const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
-        customer_id: existingCustomer.customer_id,
-        tag_number: parseInt(customerData.tag_number),
-        location_id: locationId,
-        company_id: companyId
-      });
-  
+      const response = await axios.post(
+        "https://api.italinks.com/valet/add_existing_customer.php",
+        {
+          customer_id: existingCustomer.customer_id,
+          tag_number: parseInt(customerData.tag_number, 10),
+          location_id: locationId,
+          company_id: companyId,
+        }
+      );
+
       if (response.data.success) {
+        const created =
+          response.data.customer ??
+          {
+            customer_id:
+              response.data.customer_id ??
+              existingCustomer.customer_id ??
+              Date.now(),
+            tag_number: Number(customerData.tag_number),
+            status: "IN",
+            first_name: existingCustomer.first_name || "",
+            last_name: existingCustomer.last_name || "",
+            phone_number: existingCustomer.phone_number || "",
+            vehicle_model: existingCustomer.vehicle_model || "",
+            color: existingCustomer.color || "",
+            created_at: new Date().toISOString(),
+          };
+
+        // 🔵 Ottimistico
+        onNewCustomerCreated(created);
+
         showToast.success("Existing customer added successfully!");
         setShowExistingModal(false);
         setShowFormModal(false);
         resetCustomerForm();
-        fetchCustomers();
+
+        // 🔄 Riallinea col DB
+        await refreshData();
       } else {
         showToast.error("Error: " + response.data.error);
       }
     } catch (error) {
+      console.error("handleUseExistingCustomer error:", error);
       showToast.error("Server Error.");
     }
   };
@@ -652,6 +725,65 @@ function Dashboard() {
       null,
     [customers, overnights]
   );
+
+  const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
+  const isInTodayList = (id) => (customers ?? []).some(c => c.customer_id === id);
+
+  // ⬇️ versione nuova: mai modificare totalToday qui
+  const bumpCountersOptimistic = (prevStatus, nextStatus, fromToday) => {
+    setCountersLive((prev) => {
+      let { nowCount, outCount, totalToday, overnightCount } = prev;
+
+      if (nextStatus === "OUT") {
+        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
+        outCount += 1;                        // OUT oggi sale
+        // totalToday invariato
+        if (prevStatus === "OVERNIGHT") {
+          overnightCount = Math.max(0, overnightCount - 1);
+        }
+      } else if (nextStatus === "OVERNIGHT") {
+        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
+        overnightCount += 1;                  // va tra gli overnight all-time
+        // totalToday invariato
+      } else if (isNow(nextStatus)) {
+        if (fromToday && !isNow(prevStatus)) {
+          nowCount += 1;                      // es. OUT→IN (oggi)
+        }
+        // totalToday invariato
+      }
+
+      return { nowCount, outCount, totalToday, overnightCount };
+    });
+  };
+
+  const onNewCustomerCreated = React.useCallback((newCustomer) => {
+    if (!newCustomer) return;
+
+    // Log corretto
+    console.log("🟡 Nuovo customer creato:", newCustomer);
+
+    // UI: aggiungi alla lista di oggi
+    setCustomers((prev) => [newCustomer, ...(prev ?? [])]);
+
+    // Se nasce già overnight, aggiungilo anche lì
+    if (newCustomer.status === "OVERNIGHT") {
+      setOvernights((prev) => [newCustomer, ...(prev ?? [])]);
+    }
+
+    // Contatori ottimistici (log PRIMA/DOPO dentro il setState per evitare deps)
+    setCountersLive((prev) => {
+      console.log("📊 Contatori PRIMA:", prev);
+      const next = {
+        ...prev,
+        totalToday: prev.totalToday + 1, // TOT +1 (cliente creato oggi)
+        nowCount: prev.nowCount + (isNow(newCustomer.status) ? 1 : 0),
+        overnightCount:
+          prev.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
+      };
+      console.log("📊 Contatori DOPO:", next);
+      return next;
+    });
+  }, []);
 
   const updateStatus = async (customer_id, status, opts = {}) => {
     // snapshot per rollback
@@ -667,7 +799,7 @@ function Dashboard() {
       // possiamo comunque tentare, ma avvisa che manca il tag (dipende dalle esigenze del backend)
       console.warn("updateStatus: missing tag_number, proceeding anyway");
     }
-    
+  
 
     // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
     if (status === "OVERNIGHT") {
@@ -688,6 +820,7 @@ function Dashboard() {
           ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
           : [updated, ...prev];
       });
+      bumpCountersOptimistic(current?.status ?? "IN", "OVERNIGHT", isInTodayList(customer_id));
     } else if (status === "OUT") {
       // segna OUT subito e rimuovilo dagli overnights se c’era
       setCustomers((prev) =>
@@ -705,8 +838,10 @@ function Dashboard() {
         )
       );
       setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
+      bumpCountersOptimistic(current?.status ?? "IN", "OUT", isInTodayList(customer_id));
+    } else {
+      bumpCountersOptimistic(current?.status ?? "IN", status, isInTodayList(customer_id));
     }
-
     try {
       // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
       const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
@@ -773,9 +908,10 @@ function Dashboard() {
             ? "Checkout completed"
             : `Status updated to ${status}`
         );
-
+        
         // chiudi eventuale popup
         setSelectedCustomer(null);
+        await refreshData();
       } else {
         // ❌ rollback
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
@@ -1028,7 +1164,7 @@ function Dashboard() {
       {selectedCustomer && (
         <div className="fixed bottom-0 left-0 right-0 bg-white px-6 py-4 shadow-inner border-t z-50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="text-left w-full sm:w-1/2">
-            <div className="font-semibold text-lg">{selectedCustomer.first_name} {selectedCustomer.last_name}</div>
+            <div className="font-semibold text-lg">{selectedCustomer.first_name}{" "}{selectedCustomer.last_name}</div>
             <div className="text-sm">{selectedCustomer.phone_number}</div>
             <div className="text-sm">{selectedCustomer.vehicle_model} - {selectedCustomer.color}</div>
             <div className="text-sm">Status: {selectedCustomer.status}</div>
