@@ -134,41 +134,74 @@ function Dashboard() {
     try {
       setIsLoading(true);
 
-      // 1) OGGI: per NOW / OUT / TOT
-      const todayReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+      // 1) Attivi di oggi (IN/PENDING/CARE). Se il backend non supporta status, useremo fallback sotto.
+      const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
-        timeRange: "today", // il backend applica la tua regola (es. 05:00→04:59)
-      });
+        timeRange: "today",
+        status: "ACTIVE_ONLY", // se non supportato, fallback più sotto
+      }).catch(() => null);
 
-      // 2) OVERNIGHT (senza limite di data)
-      //    - Proviamo con status="OVERNIGHT"
-      //    - Se il backend supporta "timeRange: 'all'", lo includiamo (harmless se ignorato)
+      // 2) OUT di oggi (lista separata)
+      const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        timeRange: "today",
+        status: "OUT",
+      }).catch(() => null);
+
+      // 3) OVERNIGHT all-time (senza limite data)
       const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
         status: "OVERNIGHT",
-        timeRange: "all", // se non supportato, il backend lo ignora; se serve, puoi rimuoverlo
+        timeRange: "all",
+      }).catch(() => null);
+
+      // 4) TOT “vero” (records.time_in)
+      const totReq = axios.post("https://api.italinks.com/valet/get_total_today.php", {
+        company_id: companyId,
+        location_id: locationId,
       });
 
-      const [resToday, resOver] = await Promise.all([todayReq, overnightReq]);
+      const [resActive, resOut, resOver, resTot] = await Promise.all([
+        activeReq, outReq, overnightReq, totReq
+      ]);
 
-      const today = resToday.data?.customers ?? [];
-      const over  = resOver.data?.customers ?? [];
+      // Fallback se ACTIVE_ONLY non esiste: somma IN+PENDING+CARE
+      let activeToday = resActive?.data?.customers;
+      if (!Array.isArray(activeToday)) {
+        const [rIn, rPend, rCare] = await Promise.all([
+          axios.post("https://api.italinks.com/valet/get_customers.php", {
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "IN"
+          }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", {
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING"
+          }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", {
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE"
+          }),
+        ]);
+        activeToday = [
+          ...(rIn.data?.customers ?? []),
+          ...(rPend.data?.customers ?? []),
+          ...(rCare.data?.customers ?? []),
+        ];
+      }
 
-      // —— Griglie/listati ——
-      setCustomers(today);
-      setOvernights(over);
+      const outToday       = resOut?.data?.customers ?? [];
+      const overnightAll   = resOver?.data?.customers ?? [];
+      const totalTodayDB   = Number(resTot?.data?.total_today ?? 0); // ✅
 
-      // —— CONTATORI come da specifica ——
-      const inCount      = today.filter(c => c.status === "IN").length;
-      const pendingCount = today.filter(c => c.status === "PENDING").length;
-      const careCount    = today.filter(c => c.status === "CARE").length;
-      const outCount     = today.filter(c => c.status === "OUT").length;
+      // Dataset UI
+      setCustomers(activeToday);  // griglia = solo attivi oggi
+      setOvernights(overnightAll);
 
-      const totalToday   = today.length;                           // totale OGGI (tutti gli stati)
-      const nowCount     = inCount + pendingCount + careCount;            // (IN+PENDING+CARE) solo oggi
-      const overnightCount = over.length;                                 // OVERNIGHT senza limite di data
+      // Counters
+      const nowCount       = activeToday.length;   // IN+PENDING+CARE oggi
+      const outCount       = outToday.length;      // OUT oggi
+      const overnightCount = overnightAll.length;  // OVN all-time
+      const totalToday     = totalTodayDB;         // TOT dal DB (records)
 
       setCountersLive({ nowCount, outCount, totalToday, overnightCount });
 
@@ -775,7 +808,6 @@ function Dashboard() {
       console.log("📊 Contatori PRIMA:", prev);
       const next = {
         ...prev,
-        totalToday: prev.totalToday + 1, // TOT +1 (cliente creato oggi)
         nowCount: prev.nowCount + (isNow(newCustomer.status) ? 1 : 0),
         overnightCount:
           prev.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
