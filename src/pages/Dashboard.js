@@ -80,6 +80,12 @@ function Dashboard() {
     overnightCount: 0,
   });
 
+  const prevCustomersRef = React.useRef([]);
+  const prevOvernightsRef = React.useRef([]);
+
+  React.useEffect(() => { prevCustomersRef.current = customers; }, [customers]);
+  React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
+
   // Evita flash/zeri durante i refresh
   const lastCountersRef = React.useRef(countersLive);
   React.useEffect(() => {
@@ -125,24 +131,26 @@ function Dashboard() {
     [sortDir]
   );
 
-  const refreshData = useCallback(async () => {
+  const refreshData = React.useCallback(async () => {
     if (!companyId || !locationId) {
       console.warn("refreshData aborted: missing companyId or locationId");
       return;
     }
 
     try {
-      setIsLoading(true);
+      // ⚠️ non usare più isLoading per nascondere la UI: lasciamo la griglia visibile
+      // metti al limite un flag di refresh “soft”
+      // setIsRefreshing(true);
 
-      // 1) Attivi di oggi (IN/PENDING/CARE). Se il backend non supporta status, useremo fallback sotto.
+      // === 1) Prova a chiedere ATTIVI OGGI (IN/PENDING/CARE) con scorciatoia ===
       const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
         timeRange: "today",
-        status: "ACTIVE_ONLY", // se non supportato, fallback più sotto
+        status: "ACTIVE_ONLY", // se non supportato, andremo in fallback sotto
       }).catch(() => null);
 
-      // 2) OUT di oggi (lista separata)
+      // === 2) OUT di oggi (sempre separato) ===
       const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -150,7 +158,7 @@ function Dashboard() {
         status: "OUT",
       }).catch(() => null);
 
-      // 3) OVERNIGHT all-time (senza limite data)
+      // === 3) OVERNIGHT all-time ===
       const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -158,28 +166,27 @@ function Dashboard() {
         timeRange: "all",
       }).catch(() => null);
 
-      // 4) TOT “vero” (records.time_in)
+      // === 4) TOT (records.time_in) ===
       const totReq = axios.post("https://api.italinks.com/valet/get_total_today.php", {
         company_id: companyId,
         location_id: locationId,
       });
 
-      const [resActive, resOut, resOver, resTot] = await Promise.all([
-        activeReq, outReq, overnightReq, totReq
-      ]);
+      const [resActive, resOut, resOver, resTot] =
+        await Promise.all([activeReq, outReq, overnightReq, totReq]);
 
-      // Fallback se ACTIVE_ONLY non esiste: somma IN+PENDING+CARE
+      // ---- Fallback per ATTIVI se ACTIVE_ONLY non è supportato ----
       let activeToday = resActive?.data?.customers;
       if (!Array.isArray(activeToday)) {
         const [rIn, rPend, rCare] = await Promise.all([
           axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "IN"
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "IN",
           }),
           axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING"
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING",
           }),
           axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE"
+            company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE",
           }),
         ]);
         activeToday = [
@@ -189,27 +196,36 @@ function Dashboard() {
         ];
       }
 
+      // ---- Estrai liste/valori (con default) ----
       const outToday       = resOut?.data?.customers ?? [];
       const overnightAll   = resOver?.data?.customers ?? [];
-      const totalTodayDB   = Number(resTot?.data?.total_today ?? 0); // ✅
+      const totalTodayDB   = Number(resTot?.data?.total_today ?? 0);
 
-      // Dataset UI
-      setCustomers(activeToday);  // griglia = solo attivi oggi
-      setOvernights(overnightAll);
+      // ---- Stale-while-refreshing: se qualcosa è vuoto per errore, NON cancelliamo la UI ----
+      const nextActive     = Array.isArray(activeToday) && activeToday.length >= 0
+                            ? activeToday
+                            : (prevCustomersRef.current ?? []);
+      const nextOvernights = Array.isArray(overnightAll) && overnightAll.length >= 0
+                            ? overnightAll
+                            : (prevOvernightsRef.current ?? []);
 
-      // Counters
-      const nowCount       = activeToday.length;   // IN+PENDING+CARE oggi
-      const outCount       = outToday.length;      // OUT oggi
-      const overnightCount = overnightAll.length;  // OVN all-time
-      const totalToday     = totalTodayDB;         // TOT dal DB (records)
+      // ---- Aggiorna dataset UI ----
+      setCustomers(nextActive);
+      setOvernights(nextOvernights);
+
+      // ---- Contatori coerenti col DB ----
+      const nowCount       = nextActive.length;      // IN+PENDING+CARE oggi
+      const outCount       = outToday.length;        // OUT oggi (query separata)
+      const overnightCount = nextOvernights.length;  // OVN all-time
+      const totalToday     = totalTodayDB;           // TOT dal DB
 
       setCountersLive({ nowCount, outCount, totalToday, overnightCount });
-
     } catch (e) {
       console.error("refreshData error:", e);
+      // NON svuotiamo UI; manteniamo vecchi dati
       showToast.error("Refresh failed");
     } finally {
-      setIsLoading(false);
+      // setIsRefreshing(false);
     }
   }, [companyId, locationId]);
 
