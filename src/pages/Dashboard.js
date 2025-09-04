@@ -138,19 +138,15 @@ function Dashboard() {
     }
 
     try {
-      // ⚠️ non usare più isLoading per nascondere la UI: lasciamo la griglia visibile
-      // metti al limite un flag di refresh “soft”
-      // setIsRefreshing(true);
-
-      // === 1) Prova a chiedere ATTIVI OGGI (IN/PENDING/CARE) con scorciatoia ===
+      // === 1) ATTIVI OGGI (scorciatoia). Se non supportata, facciamo fallback sotto.
       const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
         timeRange: "today",
-        status: "ACTIVE_ONLY", // se non supportato, andremo in fallback sotto
+        status: "ACTIVE_ONLY",
       }).catch(() => null);
 
-      // === 2) OUT di oggi (sempre separato) ===
+      // === 2) OUT di oggi (sempre separato)
       const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -158,7 +154,7 @@ function Dashboard() {
         status: "OUT",
       }).catch(() => null);
 
-      // === 3) OVERNIGHT all-time ===
+      // === 3) OVERNIGHT all-time
       const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -166,14 +162,14 @@ function Dashboard() {
         timeRange: "all",
       }).catch(() => null);
 
-      // === 4) TOT (records.time_in) ===
-      const totReq = axios.post("https://api.italinks.com/valet/get_total_today.php", {
+      // === 4) CONTATORI dal DB (records)
+      const countersReq = axios.post("https://api.italinks.com/valet/get_counters.php", {
         company_id: companyId,
         location_id: locationId,
-      });
+      }).catch(() => null);
 
-      const [resActive, resOut, resOver, resTot] =
-        await Promise.all([activeReq, outReq, overnightReq, totReq]);
+      const [resActive, resOut, resOver, resCounters] =
+        await Promise.all([activeReq, outReq, overnightReq, countersReq]);
 
       // ---- Fallback per ATTIVI se ACTIVE_ONLY non è supportato ----
       let activeToday = resActive?.data?.customers;
@@ -196,46 +192,34 @@ function Dashboard() {
         ];
       }
 
-      // ---- Estrai liste/valori (con default) ----
+      // ---- Estrai liste (con default) ----
       const outToday       = resOut?.data?.customers ?? [];
       const overnightAll   = resOver?.data?.customers ?? [];
-      const totalTodayDB   = Number(resTot?.data?.total_today ?? 0);
 
-      // ---- Stale-while-refreshing: se qualcosa è vuoto per errore, NON cancelliamo la UI ----
-      const nextActive     = Array.isArray(activeToday) && activeToday.length >= 0
-                            ? activeToday
-                            : (prevCustomersRef.current ?? []);
-      const nextOvernights = Array.isArray(overnightAll) && overnightAll.length >= 0
-                            ? overnightAll
-                            : (prevOvernightsRef.current ?? []);
+      // ---- Stale-while-refreshing: non cancellare UI se una fetch va male ----
+      const nextActive     = Array.isArray(activeToday) ? activeToday : (prevCustomersRef.current ?? []);
+      const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
 
-      // ---- Aggiorna dataset UI ----
+      // ---- Aggiorna dataset UI (griglia + pannello OVN) ----
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // ---- Contatori coerenti col DB ----
-      const nowCount       = nextActive.length;      // IN+PENDING+CARE oggi
-      const outCount       = outToday.length;        // OUT oggi (query separata)
-      const overnightCount = nextOvernights.length;  // OVN all-time
-      const totalToday     = totalTodayDB;           // TOT dal DB
+      // ---- Contatori dal DB (records) ----
+      const c = resCounters?.data?.success ? resCounters.data : null;
 
-      setCountersLive({ nowCount, outCount, totalToday, overnightCount });
+      setCountersLive({
+        // se il call counters fallisce, usiamo fallback innocui
+        nowCount:       c ? Number(c.now_count)        : nextActive.length,
+        outCount:       c ? Number(c.out_count)        : outToday.length,
+        totalToday:     c ? Number(c.total_today)      : 0,
+        overnightCount: c ? Number(c.overnight_count)  : nextOvernights.length,
+      });
     } catch (e) {
       console.error("refreshData error:", e);
-      // NON svuotiamo UI; manteniamo vecchi dati
       showToast.error("Refresh failed");
-    } finally {
-      // setIsRefreshing(false);
+      // Non svuotiamo la UI: manteniamo i dati precedenti
     }
   }, [companyId, locationId]);
-
-
-  // refreshdata Starter useEffect ///////////
-  useEffect(() => {
-    if (companyId && locationId) {
-      refreshData();
-    }
-  }, [companyId, locationId, refreshData]);
 
 
 
