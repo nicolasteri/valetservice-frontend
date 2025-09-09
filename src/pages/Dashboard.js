@@ -206,11 +206,23 @@ function Dashboard() {
       ]);
 
 
-
       // ---- Estrazione con helper, subito dopo Promise.all ----
       const activeTodayRaw = extractCustomers(resActive);
       const outToday       = extractCustomers(resOut);     // usalo solo se ti serve per debug
       const overnightAll   = extractCustomers(resOver);
+
+      // DEBUG
+      console.log("[RD] resOver.raw:", resOver?.data);
+      console.log("[RD] overnightAll.length (estratto):", Array.isArray(overnightAll) ? overnightAll.length : "NA");
+
+      // Normalizza campi overnight (status/tag) in modo tollerante
+      const normalizedOvernights = Array.isArray(overnightAll)
+        ? overnightAll.map((c) => ({
+            ...c,
+            status: c?.status ?? "OVERNIGHT",
+            tag_number: c?.tag_number ?? c?.tag ?? null,
+          }))
+        : [];
 
       // ATTIVI: fallback se ACTIVE_ONLY non esiste o torna vuoto
       let activeToday = activeTodayRaw;
@@ -248,10 +260,16 @@ function Dashboard() {
 
       // 3) Scritture ATOMICHE delle liste
       const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
-      const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
+      const nextOvernights = normalizedOvernights.length > 0
+        ? normalizedOvernights
+        : (prevOvernightsRef.current ?? []);
 
-      setCustomers(nextActive);
       setOvernights(nextOvernights);
+      setCustomers(nextActive);
+
+      // DEBUG
+      console.log("[RD] setOvernights ->", nextOvernights.length);
+      //
 
       // 4) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE) — gli OVERNIGHT restano nella loro sezione
       const nextActiveTags = nextActive
@@ -1205,19 +1223,22 @@ function Dashboard() {
         {/* OVERNIGHT CUSTOMERS (render only if there are items) */}
         {Array.isArray(overnights) && overnights.length > 0 && (
           <section className="mt-6">
-            <h3 className="text-lg font-semibold text-purple-700 mb-2">Overnight Vehicles</h3>
+            <h3 className="text-lg font-semibold text-purple-700 mb-2">
+              Overnight Vehicles <span className="text-xs text-gray-500">({overnights.length})</span>
+            </h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {overnights.map((customer) => {
-                const isSelected = selectedCustomer?.customer_id === customer.customer_id;
-                const tag = customer?.tag_number ?? "—";
+                const id  = customer?.customer_id ?? customer?.id ?? `${customer?.tag_number || "tag"}-${customer?.created_at || Date.now()}`;
+                const tag = customer?.tag_number ?? customer?.tag ?? "—";
                 const name = customer?.customer_name || customer?.name || "";
                 const ts = customer?.overnight_at || customer?.requested_at || customer?.created_at;
                 const elapsed = ts ? getElapsedTime(ts) : "—";
+                const isSelected = selectedCustomer?.customer_id === customer?.customer_id;
 
                 return (
                   <div
-                    key={customer.customer_id ?? `${tag}-${String(ts || "").slice(0, 19)}`}
+                    key={id}
                     className={`relative bg-purple-900 text-white p-4 rounded cursor-pointer border-2 transition-all duration-200 
                       ${isSelected ? "border-yellow-400 shadow-lg" : "border-transparent"}`}
                     onClick={() => handleCustomerClick?.(customer)}
@@ -1228,7 +1249,6 @@ function Dashboard() {
                     <div className="font-semibold">TAG #{tag}</div>
                     {name && <div className="text-xs opacity-90">{name}</div>}
                     <div className="text-xs mt-1">{elapsed} (Overnight)</div>
-
                     <div className="absolute top-1 right-2 text-yellow-200 text-xl">🌙</div>
                   </div>
                 );
@@ -1236,6 +1256,7 @@ function Dashboard() {
             </div>
           </section>
         )}
+
 
 
      {/* CUSTOMER INFO BAR */}
