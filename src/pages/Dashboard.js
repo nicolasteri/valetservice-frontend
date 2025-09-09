@@ -50,14 +50,6 @@ function Dashboard() {
     tag_number: "",
   });
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const [companyId, setCompanyId] = useState(() => {
-    const v = localStorage.getItem("company_id");
-    return v ? Number(v) : null;
-  });
-  const [locationId, setLocationId] = useState(() => {
-    const v = localStorage.getItem("location_id");
-    return v ? Number(v) : null;
-  });
   const [locationName, setLocationName] = useState("");
   const [customers, setCustomers] = useState([]);
   const [existingCustomer, setExistingCustomer] = useState(null);
@@ -99,7 +91,38 @@ function Dashboard() {
   React.useEffect(() => { prevCustomersRef.current = customers; }, [customers]);
   React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
 
+  // Subito dopo aver letto da localStorage:
+
+  const [companyId, setCompanyId] = useState(() => {
+    const v = localStorage.getItem("company_id");
+    return v ? Number(v) : null;
+  });
+  const [locationId, setLocationId] = useState(() => {
+    const v = localStorage.getItem("location_id");
+    return v ? Number(v) : null;
+  });
+
+  const companyIdNum  = companyId  ?? null;
+  const locationIdNum = locationId ?? null;
+
+  useEffect(() => {
+    if (companyId  != null) localStorage.setItem("company_id",  String(companyId));
+  }, [companyId]);
+  useEffect(() => {
+    if (locationId != null) localStorage.setItem("location_id", String(locationId));
+  }, [locationId]);
+
+ 
+
   // callback & helpers /////////////////////////
+
+  const extractCustomers = (res) => {
+    if (!res || !res.data) return [];
+    const d = res.data;
+    if (Array.isArray(d.customers)) return d.customers;
+    if (Array.isArray(d.data))      return d.data;
+    return [];
+  };
 
   /* funzione di ordinamento custom per "priority"
    - Gruppi: PENDING -> CARE -> IN -> OVERNIGHT -> OUT
@@ -137,89 +160,78 @@ function Dashboard() {
   );
 
   const refreshData = React.useCallback(async () => {
-    if (!companyId || !locationId) {
+    if (!companyIdNum || !locationIdNum) {
       console.warn("refreshData aborted: missing companyId or locationId");
       return;
     }
 
-    // sequencer per ignorare risposte vecchie
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
-
     setIsDataLoading(true);
+
     try {
-      // Soft update OVERNIGHT (se fallisce, non blocca)
       try {
-        await axios.post(
-          "https://api.italinks.com/valet/update_overnight.php",
-          { company_id: companyId, location_id: locationId },
+        await axios.post("https://api.italinks.com/valet/update_overnight.php",
+          { company_id: companyIdNum, location_id: locationIdNum },
           { timeout: 10000 }
         );
       } catch (_) {}
 
-      // Fetch paralleli
-      const activeReq = axios.post(
-        "https://api.italinks.com/valet/get_customers.php",
-        { company_id: companyId, location_id: locationId, timeRange: "today", status: "ACTIVE_ONLY" },
-        { timeout: 10000 }
-      );
-      const outReq = axios.post(
-        "https://api.italinks.com/valet/get_customers.php",
-        { company_id: companyId, location_id: locationId, timeRange: "today", status: "OUT" },
-        { timeout: 10000 }
-      );
-      // niente timeRange per OVERNIGHT
-      const overnightReq = axios.post(
-        "https://api.italinks.com/valet/get_customers.php",
-        { company_id: companyId, location_id: locationId, status: "OVERNIGHT" },
-        { timeout: 10000 }
-      );
-      const countersReq = axios.post(
-        "https://api.italinks.com/valet/get_counters.php",
-        { company_id: companyId, location_id: locationId },
-        { timeout: 10000 }
-      );
-
       const [resActive, resOut, resOver, resCounters] = await Promise.all([
-        activeReq, outReq, overnightReq, countersReq
+        axios.post("https://api.italinks.com/valet/get_customers.php",
+          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
+          { timeout: 10000 }),
+        axios.post("https://api.italinks.com/valet/get_customers.php",
+          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "OUT" },
+          { timeout: 10000 }),
+        axios.post("https://api.italinks.com/valet/get_customers.php",
+          { company_id: companyIdNum, location_id: locationIdNum, status: "OVERNIGHT" },
+          { timeout: 10000 }),
+        axios.post("https://api.italinks.com/valet/get_counters.php",
+          { company_id: companyIdNum, location_id: locationIdNum },
+          { timeout: 10000 }),
       ]);
 
-      // ATTIVI: fallback se ACTIVE_ONLY non esiste
-      let activeToday = resActive?.data?.customers;
-      if (!Array.isArray(activeToday)) {
+      // ATTIVI + Fallback robusto
+      let activeToday = extractCustomers(resActive);
+      if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" }, { timeout: 10000 }),
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" }, { timeout: 10000 }),
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" }, { timeout: 10000 }),
         ]);
         activeToday = [
-          ...(Array.isArray(rIn?.data?.customers)   ? rIn.data.customers   : []),
-          ...(Array.isArray(rPend?.data?.customers) ? rPend.data.customers : []),
-          ...(Array.isArray(rCare?.data?.customers) ? rCare.data.customers : []),
+          ...extractCustomers(rIn),
+          ...extractCustomers(rPend),
+          ...extractCustomers(rCare),
         ];
+        // dedup per sicurezza
+        const seen = new Set();
+        activeToday = activeToday.filter((c) => {
+          const k = c?.customer_id;
+          if (!k || seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
       }
 
-      const outToday     = Array.isArray(resOut?.data?.customers) ? resOut.data.customers : [];
-      const overnightAll = Array.isArray(resOver?.data?.customers) ? resOver.data.customers : [];
+      const outToday      = extractCustomers(resOut);
+      const overnightAll  = extractCustomers(resOver);
 
-      // Se nel frattempo è partito un altro refresh, abort queste scritture
       if (mySeq !== refreshSeqRef.current) return;
 
-      // Scritture ATOMICHE
       const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
       const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
 
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // ===== DERIVA I “TAG ATTIVI” DAI CUSTOMERS ATTIVI =====
-      // Se la tua sezione “tag attivi” mostra i box con il tag_number dei clienti attivi,
-      // puoi semplicemente riusare nextActive (oppure ricavare un array snello).
+      // DERIVA TAG ATTIVI dagli attivi completi
       const nextActiveTags = nextActive
-        .filter(c => c && c.tag_number) // solo chi ha tag
-        .map(c => ({
+        .filter((c) => c && c.tag_number && ["IN","PENDING","CARE"].includes(c.status))
+        .map((c) => ({
           customer_id: c.customer_id,
           tag_number:  c.tag_number,
           status:      c.status,
@@ -227,13 +239,11 @@ function Dashboard() {
           requested_at:c.requested_at || null,
           created_at:  c.created_at   || null,
         }));
-
       setActiveTags(nextActiveTags);
 
       // Contatori
       const c = resCounters?.data?.success ? resCounters.data : null;
       if (mySeq !== refreshSeqRef.current) return;
-
       if (c && typeof c === "object") {
         setCountersLive({
           nowCount:       Number(c.now_count       ?? c.nowCount       ?? 0),
@@ -245,7 +255,6 @@ function Dashboard() {
         setCountersLive(null);
       }
 
-      // debug (rimuovi quando ok)
       console.log("active/OUT/OVN/tags:", nextActive.length, outToday.length, nextOvernights.length, nextActiveTags.length);
     } catch (e) {
       console.error("refreshData error:", e);
@@ -253,9 +262,16 @@ function Dashboard() {
     } finally {
       setIsDataLoading(false);
     }
-  }, [companyId, locationId]);
+  }, [companyIdNum, locationIdNum]);
 
+ // Debug
+  console.log("IDs → companyIdNum:", companyIdNum, "locationIdNum:", locationIdNum);
 
+  useEffect(() => {
+    console.log("[RD] start");
+    refreshData();
+  }, [refreshData]);
+  // fine debug
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -359,16 +375,16 @@ function Dashboard() {
   const hasMountedRef = React.useRef(false); // per saltare la prima esecuzione del useEffect dei filtri
 
   const fetchCustomers = useCallback(async () => {
-    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
+    if (!companyIdNum || !locationIdNum) {
       console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
       return;
     }
 
     const payload = {
-      location_id: locationId,
-      company_id: companyId,
+      location_id: locationIdNum,
+      company_id:  companyIdNum,
       ...(filterStatus !== "ALL" && { status: filterStatus }),
-      search: searchQuery,
+      search:    searchQuery,
       timeRange: "today",
       sortField,
       sortDir,
@@ -384,16 +400,18 @@ function Dashboard() {
       setDbConnected(res.ok);
 
       const data = await res.json();
-      if (data.success && Array.isArray(data.customers)) {
-        const prepared = data.customers.map((c) => ({
+      const customersList = Array.isArray(data?.customers) ? data.customers
+                          : Array.isArray(data?.data)      ? data.data
+                          : [];
+
+      if (Array.isArray(customersList)) {
+        const prepared = customersList.map((c) => ({
           ...c,
           touchedAt: c.touchedAt || c.created_at,
         }));
-
-        // 1) aggiorna la lista visibile
         setCustomers(prepared);
 
-        // 2) DERIVA i “tag attivi” dagli attivi (IN/PENDING/CARE) presenti nella lista filtrata
+        // Deriva TAG ATTIVI dalla lista corrente (IN/PENDING/CARE)
         setActiveTags(
           prepared
             .filter((c) => c && c.tag_number && ["IN","PENDING","CARE"].includes(c.status))
@@ -405,16 +423,15 @@ function Dashboard() {
               requested_at:c.requested_at || null,
               created_at:  c.created_at   || null,
             }))
-        );      
+        );
       } else {
-        console.error("❌ Failed fetching customers:", data.error || data);
-        // in caso di errore NON svuotare niente: lascia i dati precedenti
+        console.error("❌ Failed fetching customers:", data?.error || data);
       }
     } catch (err) {
       console.error("🔥 Fetch error:", err);
       setDbConnected(false);
     }
-  }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
+  }, [companyIdNum, locationIdNum, filterStatus, searchQuery, sortField, sortDir]);
 
   // useEffect /////////////////////////
   useEffect(() => {
@@ -488,7 +505,7 @@ function Dashboard() {
     try {
       const response = await axios.post("https://api.italinks.com/valet/check_phone.php", {
         phone_number: phone,
-        company_id: companyId,
+        company_id: companyIdNum,
       });
 
       if (response.data.success && response.data.exists) {
@@ -535,8 +552,8 @@ function Dashboard() {
     }
 
     try {
-      const company_id = companyId;
-      const location_id = locationId;
+      const company_id = companyIdNum;
+      const location_id = locationIdNum;
 
       // 🔍 Check se il cliente esiste già per questa company
       const responseCheck = await axios.post(
@@ -664,8 +681,8 @@ function Dashboard() {
         },
         body: JSON.stringify({
           tag_number: parseInt(customerData.tag_number),
-          location_id: locationId,
-          company_id: companyId,
+          location_id: locationIdNum,
+          company_id: companyIdNum,
         }),
       });
 
@@ -699,8 +716,8 @@ function Dashboard() {
         {
           customer_id: existingCustomer.customer_id,
           tag_number: parseInt(customerData.tag_number, 10),
-          location_id: locationId,
-          company_id: companyId,
+          location_id: locationIdNum,
+          company_id: companyIdNum,
         }
       );
 
@@ -872,8 +889,8 @@ function Dashboard() {
         body: JSON.stringify({
           customer_id,
           status,
-          company_id: companyId,
-          location_id: locationId,
+          company_id: companyIdNum,
+          location_id: locationIdNum,
           tag_number,
         }),
       });
