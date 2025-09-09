@@ -86,6 +86,13 @@ function Dashboard() {
   // Quando ti serve leggere i contatori nel render:
   const counters = countersLive ?? lastCountersRef.current; // <-- usa questo
 
+  const [activeTags, setActiveTags] = React.useState([]);
+  const prevActiveTagsRef = React.useRef([]);
+  React.useEffect(() => { prevActiveTagsRef.current = activeTags; }, [activeTags]);
+
+  // (facoltativo se non l’hai) sequencer per ignorare risposte vecchie
+  const refreshSeqRef = React.useRef(0);
+
   const prevCustomersRef = React.useRef([]);
   const prevOvernightsRef = React.useRef([]);
 
@@ -135,9 +142,12 @@ function Dashboard() {
       return;
     }
 
+    // sequencer per ignorare risposte vecchie
+    const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
+
     setIsDataLoading(true);
     try {
-      // 0) Aggiornamento OVERNIGHT (soft): se fallisce non blocca il resto
+      // Soft update OVERNIGHT (se fallisce, non blocca)
       try {
         await axios.post(
           "https://api.italinks.com/valet/update_overnight.php",
@@ -146,26 +156,23 @@ function Dashboard() {
         );
       } catch (_) {}
 
-      // 1) Fetch paralleli – niente .catch(() => null)
+      // Fetch paralleli
       const activeReq = axios.post(
         "https://api.italinks.com/valet/get_customers.php",
         { company_id: companyId, location_id: locationId, timeRange: "today", status: "ACTIVE_ONLY" },
         { timeout: 10000 }
       );
-
       const outReq = axios.post(
         "https://api.italinks.com/valet/get_customers.php",
         { company_id: companyId, location_id: locationId, timeRange: "today", status: "OUT" },
         { timeout: 10000 }
       );
-
       // niente timeRange per OVERNIGHT
       const overnightReq = axios.post(
         "https://api.italinks.com/valet/get_customers.php",
         { company_id: companyId, location_id: locationId, status: "OVERNIGHT" },
         { timeout: 10000 }
       );
-
       const countersReq = axios.post(
         "https://api.italinks.com/valet/get_counters.php",
         { company_id: companyId, location_id: locationId },
@@ -176,25 +183,16 @@ function Dashboard() {
         activeReq, outReq, overnightReq, countersReq
       ]);
 
-      // 2) ATTIVI: se ACTIVE_ONLY non esiste, fallback a IN/PENDING/CARE
+      // ATTIVI: fallback se ACTIVE_ONLY non esiste
       let activeToday = resActive?.data?.customers;
       if (!Array.isArray(activeToday)) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" },
-            { timeout: 10000 }
-          ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" },
-            { timeout: 10000 }
-          ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" },
-            { timeout: 10000 }
-          ),
+          axios.post("https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" }, { timeout: 10000 }),
+          axios.post("https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" }, { timeout: 10000 }),
+          axios.post("https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" }, { timeout: 10000 }),
         ]);
         activeToday = [
           ...(Array.isArray(rIn?.data?.customers)   ? rIn.data.customers   : []),
@@ -203,18 +201,39 @@ function Dashboard() {
         ];
       }
 
-      const outToday      = Array.isArray(resOut?.data?.customers) ? resOut.data.customers : [];
-      const overnightAll  = Array.isArray(resOver?.data?.customers) ? resOver.data.customers : [];
+      const outToday     = Array.isArray(resOut?.data?.customers) ? resOut.data.customers : [];
+      const overnightAll = Array.isArray(resOver?.data?.customers) ? resOver.data.customers : [];
 
-      const nextActive     = Array.isArray(activeToday)   ? activeToday   : (prevCustomersRef.current   ?? []);
-      const nextOvernights = Array.isArray(overnightAll)  ? overnightAll  : (prevOvernightsRef.current ?? []);
+      // Se nel frattempo è partito un altro refresh, abort queste scritture
+      if (mySeq !== refreshSeqRef.current) return;
 
-      // 3) Scritture ATOMICHE (mai svuotare alla cieca)
+      // Scritture ATOMICHE
+      const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
+      const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
+
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // 4) Contatori: se falliscono NON azzeriamo (mostreremo l'ultimo valido)
+      // ===== DERIVA I “TAG ATTIVI” DAI CUSTOMERS ATTIVI =====
+      // Se la tua sezione “tag attivi” mostra i box con il tag_number dei clienti attivi,
+      // puoi semplicemente riusare nextActive (oppure ricavare un array snello).
+      const nextActiveTags = nextActive
+        .filter(c => c && c.tag_number) // solo chi ha tag
+        .map(c => ({
+          customer_id: c.customer_id,
+          tag_number:  c.tag_number,
+          status:      c.status,
+          name:        c.customer_name || c.name || "",
+          requested_at:c.requested_at || null,
+          created_at:  c.created_at   || null,
+        }));
+
+      setActiveTags(nextActiveTags);
+
+      // Contatori
       const c = resCounters?.data?.success ? resCounters.data : null;
+      if (mySeq !== refreshSeqRef.current) return;
+
       if (c && typeof c === "object") {
         setCountersLive({
           nowCount:       Number(c.now_count       ?? c.nowCount       ?? 0),
@@ -227,12 +246,10 @@ function Dashboard() {
       }
 
       // debug (rimuovi quando ok)
-      console.log("counters api:", resCounters?.data);
-      console.log("active/OUT/OVN:", nextActive.length, outToday.length, nextOvernights.length);
+      console.log("active/OUT/OVN/tags:", nextActive.length, outToday.length, nextOvernights.length, nextActiveTags.length);
     } catch (e) {
       console.error("refreshData error:", e);
       showToast?.error?.("Refresh failed");
-      // niente clear della UI
     } finally {
       setIsDataLoading(false);
     }
@@ -339,6 +356,8 @@ function Dashboard() {
     });
   };
   
+  const hasMountedRef = React.useRef(false); // per saltare la prima esecuzione del useEffect dei filtri
+
   const fetchCustomers = useCallback(async () => {
     if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
       console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
@@ -355,9 +374,6 @@ function Dashboard() {
       sortDir,
     };
 
-    // DEBUG opzionale
-    // console.log("📤 Sending filters:", payload);
-
     try {
       const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
         method: "POST",
@@ -373,14 +389,31 @@ function Dashboard() {
           ...c,
           touchedAt: c.touchedAt || c.created_at,
         }));
-        // ❗️NON ordinare qui: ordina già il server (tranne "priority", che gestisci con useMemo)
+
+        // 1) aggiorna la lista visibile
         setCustomers(prepared);
+
+        // 2) DERIVA i “tag attivi” dagli attivi (IN/PENDING/CARE) presenti nella lista filtrata
+        const derivedActiveTags = prepared
+          .filter((c) => c && c.tag_number && ["IN", "PENDING", "CARE"].includes(c.status))
+          .map((c) => ({
+            customer_id: c.customer_id,
+            tag_number:  c.tag_number,
+            status:      c.status,
+            name:        c.customer_name || c.name || "",
+            requested_at:c.requested_at || null,
+            created_at:  c.created_at   || null,
+          }));
+
+        setActiveTags(derivedActiveTags);
       } else {
         console.error("❌ Failed fetching customers:", data.error || data);
+        // in caso di errore NON svuotare niente: lascia i dati precedenti
       }
     } catch (err) {
       console.error("🔥 Fetch error:", err);
       setDbConnected(false);
+      // NON fare setCustomers([]) / setActiveTags([])
     }
   }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
 
@@ -416,19 +449,26 @@ function Dashboard() {
   }, [navigate]);
 
   useEffect(() => {
+    // Salta la primissima esecuzione (al mount ci pensa refreshData)
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+
     let cancelled = false;
-    setIsLoading(true);
+    setIsLoading(true); // questo è il loader “UI/filtri”, non quello dati globali
 
     (async () => {
       try {
-        await fetchCustomers();   // ← usa la callback
+        await fetchCustomers();
       } finally {
         if (!cancelled) setIsLoading(false);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [fetchCustomers]);   // ✅ SOLO la callback qui
+  }, [fetchCustomers]);
+
 
 
  
