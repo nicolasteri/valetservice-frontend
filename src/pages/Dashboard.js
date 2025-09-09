@@ -40,7 +40,7 @@ function Dashboard() {
   const deferredSearch  = useDeferredValue(debouncedSearch);
   const [filterStatus, setFilterStatus] = useState("ALL");
   // Overnight list (separata dalla lista "today")
-  const [overnights, setOvernights] = useState([]);
+  const [overnights, setOvernights] = React.useState([]);
   const [customerData, setCustomerData] = useState({
     first_name: "",
     last_name: "",
@@ -112,17 +112,18 @@ function Dashboard() {
     if (locationId != null) localStorage.setItem("location_id", String(locationId));
   }, [locationId]);
 
- 
+       // 2) Estrai liste (supporta sia .customers che .data)
+      const extractCustomers = (res) => {
+        if (!res || !res.data) return [];
+        const d = res.data;
+        if (Array.isArray(d.customers)) return d.customers;
+        if (Array.isArray(d.data)) return d.data;
+        return [];
+      };
 
   // callback & helpers /////////////////////////
 
-  const extractCustomers = (res) => {
-    if (!res || !res.data) return [];
-    const d = res.data;
-    if (Array.isArray(d.customers)) return d.customers;
-    if (Array.isArray(d.data))      return d.data;
-    return [];
-  };
+
 
   /* funzione di ordinamento custom per "priority"
    - Gruppi: PENDING -> CARE -> IN -> OVERNIGHT -> OUT
@@ -160,54 +161,79 @@ function Dashboard() {
   );
 
   const refreshData = React.useCallback(async () => {
-    if (!companyIdNum || !locationIdNum) {
-      console.warn("refreshData aborted: missing companyId or locationId");
+    // Guard su ID
+    if (!Number.isFinite(companyIdNum) || !Number.isFinite(locationIdNum)) {
+      console.warn("refreshData aborted: missing companyIdNum/locationIdNum");
       return;
     }
 
+    // Sequencer anti-race: solo l’ultimo refresh può scrivere
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
-    setIsDataLoading(true);
 
+    setIsDataLoading(true);
     try {
+      // 0) Soft update OVERNIGHT (se fallisce, non blocca)
       try {
-        await axios.post("https://api.italinks.com/valet/update_overnight.php",
+        await axios.post(
+          "https://api.italinks.com/valet/update_overnight.php",
           { company_id: companyIdNum, location_id: locationIdNum },
           { timeout: 10000 }
         );
       } catch (_) {}
 
+      // 1) Fetch paralleli principali
       const [resActive, resOut, resOver, resCounters] = await Promise.all([
-        axios.post("https://api.italinks.com/valet/get_customers.php",
+        axios.post(
+          "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
-          { timeout: 10000 }),
-        axios.post("https://api.italinks.com/valet/get_customers.php",
+          { timeout: 10000 }
+        ),
+        axios.post(
+          "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "OUT" },
-          { timeout: 10000 }),
-        axios.post("https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, status: "OVERNIGHT" },
-          { timeout: 10000 }),
-        axios.post("https://api.italinks.com/valet/get_counters.php",
+          { timeout: 10000 }
+        ),
+        axios.post(
+          "https://api.italinks.com/valet/get_customers.php",
+          { company_id: companyIdNum, location_id: locationIdNum, status: "OVERNIGHT" }, // niente timeRange
+          { timeout: 10000 }
+        ),
+        axios.post(
+          "https://api.italinks.com/valet/get_counters.php",
           { company_id: companyIdNum, location_id: locationIdNum },
-          { timeout: 10000 }),
+          { timeout: 10000 }
+        ),
       ]);
 
-      // ATTIVI + Fallback robusto
-      let activeToday = extractCustomers(resActive);
+
+
+      // ---- Estrazione con helper, subito dopo Promise.all ----
+      const activeTodayRaw = extractCustomers(resActive);
+      const outToday       = extractCustomers(resOut);     // usalo solo se ti serve per debug
+      const overnightAll   = extractCustomers(resOver);
+
+      // ATTIVI: fallback se ACTIVE_ONLY non esiste o torna vuoto
+      let activeToday = activeTodayRaw;
       if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" },
+            { timeout: 10000 }),
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" },
+            { timeout: 10000 }),
           axios.post("https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" }, { timeout: 10000 }),
+            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" },
+            { timeout: 10000 }),
         ]);
+
         activeToday = [
           ...extractCustomers(rIn),
           ...extractCustomers(rPend),
           ...extractCustomers(rCare),
         ];
-        // dedup per sicurezza
+
+        // (opzionale) dedup per sicurezza
         const seen = new Set();
         activeToday = activeToday.filter((c) => {
           const k = c?.customer_id;
@@ -217,20 +243,19 @@ function Dashboard() {
         });
       }
 
-      const outToday      = extractCustomers(resOut);
-      const overnightAll  = extractCustomers(resOver);
-
+      // Se è partito un altro refresh nel frattempo, non scrivere
       if (mySeq !== refreshSeqRef.current) return;
 
+      // 3) Scritture ATOMICHE delle liste
       const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
       const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
 
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // DERIVA TAG ATTIVI dagli attivi completi
+      // 4) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE) — gli OVERNIGHT restano nella loro sezione
       const nextActiveTags = nextActive
-        .filter((c) => c && c.tag_number && ["IN","PENDING","CARE"].includes(c.status))
+        .filter((c) => c && c.tag_number && ["IN", "PENDING", "CARE"].includes(c.status))
         .map((c) => ({
           customer_id: c.customer_id,
           tag_number:  c.tag_number,
@@ -241,9 +266,10 @@ function Dashboard() {
         }));
       setActiveTags(nextActiveTags);
 
-      // Contatori
+      // 5) Contatori (dopo le liste) — se la risposta non è valida, non azzeriamo
       const c = resCounters?.data?.success ? resCounters.data : null;
       if (mySeq !== refreshSeqRef.current) return;
+
       if (c && typeof c === "object") {
         setCountersLive({
           nowCount:       Number(c.now_count       ?? c.nowCount       ?? 0),
@@ -252,18 +278,19 @@ function Dashboard() {
           overnightCount: Number(c.overnight_count ?? c.overnightCount ?? 0),
         });
       } else {
-        setCountersLive(null);
+        setCountersLive(null); // userai lastCountersRef come fallback in render
       }
 
+      // (facoltativo) Debug
       console.log("active/OUT/OVN/tags:", nextActive.length, outToday.length, nextOvernights.length, nextActiveTags.length);
     } catch (e) {
       console.error("refreshData error:", e);
       showToast?.error?.("Refresh failed");
+      // nessun reset di stato qui: manteniamo i dati precedenti
     } finally {
       setIsDataLoading(false);
     }
   }, [companyIdNum, locationIdNum]);
-
  // Debug
   console.log("IDs → companyIdNum:", companyIdNum, "locationIdNum:", locationIdNum);
 
@@ -1175,34 +1202,41 @@ function Dashboard() {
           </div>
         </div>
 
-        {/* OVERNIGHT CUSTOMERS */}
-        {overnights.length > 0 && (
-          <div className="mt-6">
+        {/* OVERNIGHT CUSTOMERS (render only if there are items) */}
+        {Array.isArray(overnights) && overnights.length > 0 && (
+          <section className="mt-6">
             <h3 className="text-lg font-semibold text-purple-700 mb-2">Overnight Vehicles</h3>
-            <div className="grid grid-cols-4 gap-4">
-            {overnights.map((customer) => {
-              const isSelected = selectedCustomer?.customer_id === customer.customer_id;
 
-              return (
-                <div key={customer.customer_id}
-                  className={`relative bg-purple-900 text-white p-4 rounded cursor-pointer border-2 transition-all duration-200 
-                    ${isSelected ? 'border-yellow-400 shadow-lg' : 'border-transparent'}`}
-                  onClick={() => handleCustomerClick(customer)}
-                >
-                  <div className="font-semibold">TAG #{customer.tag_number}</div>
-                  <div className="text-xs mt-1">{getElapsedTime(customer.created_at)} (Overnight)</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {overnights.map((customer) => {
+                const isSelected = selectedCustomer?.customer_id === customer.customer_id;
+                const tag = customer?.tag_number ?? "—";
+                const name = customer?.customer_name || customer?.name || "";
+                const ts = customer?.overnight_at || customer?.requested_at || customer?.created_at;
+                const elapsed = ts ? getElapsedTime(ts) : "—";
 
-                  {/* 🌙 Icona luna in alto a destra */}
-                  <div className="absolute top-1 right-2 text-yellow-200 text-xl">
-                    🌙
+                return (
+                  <div
+                    key={customer.customer_id ?? `${tag}-${String(ts || "").slice(0, 19)}`}
+                    className={`relative bg-purple-900 text-white p-4 rounded cursor-pointer border-2 transition-all duration-200 
+                      ${isSelected ? "border-yellow-400 shadow-lg" : "border-transparent"}`}
+                    onClick={() => handleCustomerClick?.(customer)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && handleCustomerClick?.(customer)}
+                  >
+                    <div className="font-semibold">TAG #{tag}</div>
+                    {name && <div className="text-xs opacity-90">{name}</div>}
+                    <div className="text-xs mt-1">{elapsed} (Overnight)</div>
+
+                    <div className="absolute top-1 right-2 text-yellow-200 text-xl">🌙</div>
                   </div>
-                </div>
-              );
-            })}
-
+                );
+              })}
             </div>
-          </div>
+          </section>
         )}
+
 
      {/* CUSTOMER INFO BAR */}
       {selectedCustomer && (
