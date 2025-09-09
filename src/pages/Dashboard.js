@@ -79,6 +79,9 @@ function Dashboard() {
     totalToday: 0,
     overnightCount: 0,
   });
+  // prevCountersRef per SWR in caso di fetch fallita
+  const prevCountersRef = React.useRef({ nowCount: 0, outCount: 0, totalToday: 0, overnightCount: 0 });
+  React.useEffect(() => { prevCountersRef.current = countersLive; }, [countersLive]);
 
   const prevCustomersRef = React.useRef([]);
   const prevOvernightsRef = React.useRef([]);
@@ -138,7 +141,6 @@ function Dashboard() {
     }
 
     try {
-      // === 1) ATTIVI OGGI (scorciatoia). Se non supportata, facciamo fallback sotto.
       const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -146,7 +148,6 @@ function Dashboard() {
         status: "ACTIVE_ONLY",
       }).catch(() => null);
 
-      // === 2) OUT di oggi (sempre separato)
       const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
@@ -154,15 +155,13 @@ function Dashboard() {
         status: "OUT",
       }).catch(() => null);
 
-      // === 3) OVERNIGHT all-time
+      // 👇 niente timeRange: alcuni backend lo ignorano con OVERNIGHT
       const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
         company_id: companyId,
         location_id: locationId,
         status: "OVERNIGHT",
-        timeRange: "all",
       }).catch(() => null);
 
-      // === 4) CONTATORI dal DB (records)
       const countersReq = axios.post("https://api.italinks.com/valet/get_counters.php", {
         company_id: companyId,
         location_id: locationId,
@@ -171,53 +170,48 @@ function Dashboard() {
       const [resActive, resOut, resOver, resCounters] =
         await Promise.all([activeReq, outReq, overnightReq, countersReq]);
 
-      // ---- Fallback per ATTIVI se ACTIVE_ONLY non è supportato ----
+      // Fallback ATTIVI se ACTIVE_ONLY non esiste
       let activeToday = resActive?.data?.customers;
       if (!Array.isArray(activeToday)) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "IN",
-          }),
-          axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING",
-          }),
-          axios.post("https://api.italinks.com/valet/get_customers.php", {
-            company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE",
-          }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" }),
         ]);
         activeToday = [
-          ...(rIn.data?.customers ?? []),
-          ...(rPend.data?.customers ?? []),
-          ...(rCare.data?.customers ?? []),
+          ...(rIn?.data?.customers ?? []),
+          ...(rPend?.data?.customers ?? []),
+          ...(rCare?.data?.customers ?? []),
         ];
       }
 
-      // ---- Estrai liste (con default) ----
       const outToday       = resOut?.data?.customers ?? [];
       const overnightAll   = resOver?.data?.customers ?? [];
 
-      // ---- Stale-while-refreshing: non cancellare UI se una fetch va male ----
       const nextActive     = Array.isArray(activeToday) ? activeToday : (prevCustomersRef.current ?? []);
       const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
 
-      // ---- Aggiorna dataset UI (griglia + pannello OVN) ----
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // ---- Contatori dal DB (records) ----
+      // 🔢 contatori dal DB (records) — se fail, NON azzeriamo: teniamo i precedenti
       const c = resCounters?.data?.success ? resCounters.data : null;
 
       setCountersLive({
-        // se il call counters fallisce, usiamo fallback innocui
-        nowCount:       c ? Number(c.now_count)        : nextActive.length,
-        outCount:       c ? Number(c.out_count)        : outToday.length,
-        totalToday:     c ? Number(c.total_today)      : 0,
-        overnightCount: c ? Number(c.overnight_count)  : nextOvernights.length,
+        nowCount:       c ? Number(c.now_count)        : (prevCountersRef.current?.nowCount ?? nextActive.length),
+        outCount:       c ? Number(c.out_count)        : (prevCountersRef.current?.outCount ?? outToday.length),
+        totalToday:     c ? Number(c.total_today)      : (prevCountersRef.current?.totalToday ?? 0),
+        overnightCount: c ? Number(c.overnight_count)  : (prevCountersRef.current?.overnightCount ?? nextOvernights.length),
       });
+
+      // debug temporanei (rimuovi quando ok)
+      console.log("counters api:", resCounters?.data);
+      console.log("active/OUT/OVN:", nextActive.length, outToday.length, nextOvernights.length);
+
     } catch (e) {
       console.error("refreshData error:", e);
       showToast.error("Refresh failed");
-      // Non svuotiamo la UI: manteniamo i dati precedenti
+      // niente clear della UI
     }
   }, [companyId, locationId]);
 
@@ -1008,8 +1002,8 @@ function Dashboard() {
             <div className="text-black-600">NOW: {counters.nowCount}</div>
             <div className="text-black-600">OUT: {counters.outCount}</div>
 
-            {counters.overnightCount > 0 && (
-              <div className="text-black-600">OVN: {counters.overnightCount}</div>
+            {countersLive.overnightCount > 0 && (
+              <div className="text-black-600">OVN: {countersLive.overnightCount}</div>
             )}
           </div>
 
