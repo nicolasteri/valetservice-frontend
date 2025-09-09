@@ -65,7 +65,7 @@ function Dashboard() {
   const [highlightTag, setHighlightTag] = useState(false);
   const [selectedSetting, setSelectedSetting] = useState(null);
   // Blocco per login e controllo dati
-  const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
+  // const [isLoading, setIsLoading] = useState(true); // stato isLoading per bloccare il render finché non ha verificato i dati x accesso
   const [tagStatus, setTagStatus] = useState(null); // 'available' | 'unavailable' | null
   const [checkingTag, setCheckingTag] = useState(false); // per gestire eventuale spinner
   // SORT BY default: Arrival ↓ (più recenti in alto)
@@ -394,18 +394,18 @@ function Dashboard() {
         setCustomers(prepared);
 
         // 2) DERIVA i “tag attivi” dagli attivi (IN/PENDING/CARE) presenti nella lista filtrata
-        const derivedActiveTags = prepared
-          .filter((c) => c && c.tag_number && ["IN", "PENDING", "CARE"].includes(c.status))
-          .map((c) => ({
-            customer_id: c.customer_id,
-            tag_number:  c.tag_number,
-            status:      c.status,
-            name:        c.customer_name || c.name || "",
-            requested_at:c.requested_at || null,
-            created_at:  c.created_at   || null,
-          }));
-
-        setActiveTags(derivedActiveTags);
+        setActiveTags(
+          prepared
+            .filter((c) => c && c.tag_number && ["IN","PENDING","CARE"].includes(c.status))
+            .map((c) => ({
+              customer_id: c.customer_id,
+              tag_number:  c.tag_number,
+              status:      c.status,
+              name:        c.customer_name || c.name || "",
+              requested_at:c.requested_at || null,
+              created_at:  c.created_at   || null,
+            }))
+        );      
       } else {
         console.error("❌ Failed fetching customers:", data.error || data);
         // in caso di errore NON svuotare niente: lascia i dati precedenti
@@ -413,7 +413,6 @@ function Dashboard() {
     } catch (err) {
       console.error("🔥 Fetch error:", err);
       setDbConnected(false);
-      // NON fare setCustomers([]) / setActiveTags([])
     }
   }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
 
@@ -456,13 +455,13 @@ function Dashboard() {
     }
 
     let cancelled = false;
-    setIsLoading(true); // questo è il loader “UI/filtri”, non quello dati globali
+    setIsDataLoading(true); // questo è il loader “UI/filtri”, non quello dati globali
 
     (async () => {
       try {
         await fetchCustomers();
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled) setIsDataLoading(false);
       }
     })();
 
@@ -1108,7 +1107,7 @@ function Dashboard() {
         {/* MAIN CONTENT - CLIENTI ATTUALI */}
         <div className="relative">
           {/* Overlay: copre solo la griglia, non la search */}
-          {isLoading && (
+          {isDataLoading && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-sm">
               <div className="text-xl font-semibold text-gray-500" aria-live="polite">
                 Loading dashboard...
