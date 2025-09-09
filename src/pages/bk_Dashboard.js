@@ -72,6 +72,31 @@ function Dashboard() {
   const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
   const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
 
+  // Contatori ricevuti dal server (con fallback)
+  const [countersLive, setCountersLive] = React.useState({
+    nowCount: 0,
+    outCount: 0,
+    totalToday: 0,
+    overnightCount: 0,
+  });
+  // prevCountersRef per SWR in caso di fetch fallita
+  const prevCountersRef = React.useRef({ nowCount: 0, outCount: 0, totalToday: 0, overnightCount: 0 });
+  React.useEffect(() => { prevCountersRef.current = countersLive; }, [countersLive]);
+
+  const prevCustomersRef = React.useRef([]);
+  const prevOvernightsRef = React.useRef([]);
+
+  React.useEffect(() => { prevCustomersRef.current = customers; }, [customers]);
+  React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
+
+  // Evita flash/zeri durante i refresh
+  const lastCountersRef = React.useRef(countersLive);
+  React.useEffect(() => {
+    if (!isLoading) lastCountersRef.current = countersLive;
+  }, [isLoading, countersLive]);
+
+  const counters = isLoading ? lastCountersRef.current : countersLive;
+
   // callback & helpers /////////////////////////
 
   /* funzione di ordinamento custom per "priority"
@@ -109,35 +134,87 @@ function Dashboard() {
     [sortDir]
   );
 
-  const refreshData = useCallback(async () => {
+  const refreshData = React.useCallback(async () => {
+    if (!companyId || !locationId) {
+      console.warn("refreshData aborted: missing companyId or locationId");
+      return;
+    }
+
     try {
-      setIsLoading(true); // 👈 loading solo qui, mai nella search
+      const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        timeRange: "today",
+        status: "ACTIVE_ONLY",
+      }).catch(() => null);
 
-      const [resToday, resOver] = await Promise.all([
-        axios.post("https://api.italinks.com/valet/get_customers.php", {
-          company_id: companyId,
-          location_id: locationId,
-          timeRange: "today",
-        }),
-        axios.post("https://api.italinks.com/valet/get_overnights.php", {
-          company_id: companyId,
-          location_id: locationId,
-        }),
-      ]);
+      const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        timeRange: "today",
+        status: "OUT",
+      }).catch(() => null);
 
-      setCustomers(resToday.data?.customers ?? []);
-      setOvernights(resOver.data?.customers ?? []);
+      // 👇 niente timeRange: alcuni backend lo ignorano con OVERNIGHT
+      const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
+        company_id: companyId,
+        location_id: locationId,
+        status: "OVERNIGHT",
+      }).catch(() => null);
+
+      const countersReq = axios.post("https://api.italinks.com/valet/get_counters.php", {
+        company_id: companyId,
+        location_id: locationId,
+      }).catch(() => null);
+
+      const [resActive, resOut, resOver, resCounters] =
+        await Promise.all([activeReq, outReq, overnightReq, countersReq]);
+
+      // Fallback ATTIVI se ACTIVE_ONLY non esiste
+      let activeToday = resActive?.data?.customers;
+      if (!Array.isArray(activeToday)) {
+        const [rIn, rPend, rCare] = await Promise.all([
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" }),
+          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" }),
+        ]);
+        activeToday = [
+          ...(rIn?.data?.customers ?? []),
+          ...(rPend?.data?.customers ?? []),
+          ...(rCare?.data?.customers ?? []),
+        ];
+      }
+
+      const outToday       = resOut?.data?.customers ?? [];
+      const overnightAll   = resOver?.data?.customers ?? [];
+
+      const nextActive     = Array.isArray(activeToday) ? activeToday : (prevCustomersRef.current ?? []);
+      const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
+
+      setCustomers(nextActive);
+      setOvernights(nextOvernights);
+
+      // 🔢 contatori dal DB (records) — se fail, NON azzeriamo: teniamo i precedenti
+      const c = resCounters?.data?.success ? resCounters.data : null;
+
+      setCountersLive({
+        nowCount:       c ? Number(c.now_count)        : (prevCountersRef.current?.nowCount ?? nextActive.length),
+        outCount:       c ? Number(c.out_count)        : (prevCountersRef.current?.outCount ?? outToday.length),
+        totalToday:     c ? Number(c.total_today)      : (prevCountersRef.current?.totalToday ?? 0),
+        overnightCount: c ? Number(c.overnight_count)  : (prevCountersRef.current?.overnightCount ?? nextOvernights.length),
+      });
+
+      // debug temporanei (rimuovi quando ok)
+      console.log("counters api:", resCounters?.data);
+      console.log("active/OUT/OVN:", nextActive.length, outToday.length, nextOvernights.length);
+
     } catch (e) {
       console.error("refreshData error:", e);
       showToast.error("Refresh failed");
-    } finally {
-      setIsLoading(false); // 👈 sempre azzera alla fine
+      // niente clear della UI
     }
   }, [companyId, locationId]);
-  // refreshdata Starter useEffect ///////////
-  useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+
 
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
@@ -145,21 +222,6 @@ function Dashboard() {
     const list = customers ?? [];
     return list.filter((c) => isToday(c.created_at));
   }, [customers]);
-
-  const inToday = useMemo(() => todayCustomers.length, [todayCustomers]);
-
-  const nowCount = useMemo(
-    () => todayCustomers.filter((c) => ["IN", "PENDING", "CARE"].includes(c.status)).length,
-    [todayCustomers]
-  );
-
-  const outCount = useMemo(
-    () => todayCustomers.filter((c) => c.status === "OUT").length,
-    [todayCustomers]
-  );
-
-  const countOvernight = useMemo(() => overnights.length, [overnights]);
-
 
   const filteredCustomers = useMemo(() => {
     const list = todayCustomers
@@ -186,7 +248,6 @@ function Dashboard() {
         return matchesSearch && matchesStatus;
       });
 
-    // ⛔️ NIENTE customSort qui: il sort lo facciamo sotto, in sortedCustomers
     return list;
   }, [todayCustomers, deferredSearch, filterStatus]);
 
@@ -228,7 +289,7 @@ function Dashboard() {
     return entry >= start && entry <= end;
   }
 
-// handler per cambiare il tipo di sort
+  // handler per cambiare il tipo di sort
   function toggleSort(field) {
     if (field === "priority") {
       if (sortField === "priority") {
@@ -469,19 +530,19 @@ function Dashboard() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-  
+
     if (!customerData.tag_number) {
       setHighlightTag(true);
       showToast.error("Insert Tag Number!");
       setTimeout(() => setHighlightTag(false), 1500);
       return;
     }
-  
+
     try {
       const company_id = companyId;
       const location_id = locationId;
-  
-      // 🔍 Controlla se il cliente esiste già per questa company
+
+      // 🔍 Check se il cliente esiste già per questa company
       const responseCheck = await axios.post(
         "https://api.italinks.com/valet/check_phone.php",
         {
@@ -489,29 +550,52 @@ function Dashboard() {
           company_id,
         }
       );
-  
+
       if (responseCheck.data.success && responseCheck.data.exists) {
-        // ✅ Cliente già registrato: crea solo record e aggiorna tag
+        // ✅ Cliente già registrato: crea record odierno e aggiorna tag
         const customer_id = responseCheck.data.customer.customer_id;
-  
+
         const responseAdd = await axios.post(
           "https://api.italinks.com/valet/add_existing_customer.php",
           {
             customer_id,
-            tag_number: parseInt(customerData.tag_number),
+            tag_number: parseInt(customerData.tag_number, 10),
             location_id,
+            company_id,
           }
         );
-  
+
         if (responseAdd.data.success) {
+          // Proviamo a prendere il record creato dal backend; altrimenti sintetizziamo
+          const created =
+            responseAdd.data.customer ??
+            {
+              customer_id:
+                responseAdd.data.customer_id ??
+                customer_id ??
+                Date.now(), // fallback id locale
+              tag_number: Number(customerData.tag_number),
+              status: "IN", // di solito all'ingresso è IN
+              first_name: responseCheck.data.customer.first_name || "",
+              last_name: responseCheck.data.customer.last_name || "",
+              phone_number: customerData.phone_number,
+              vehicle_model: responseCheck.data.customer.vehicle_model || "",
+              color: responseCheck.data.customer.color || "",
+              created_at: new Date().toISOString(),
+            };
+
+          // 🔵 Ottimistico: subito su lista + contatori
+          onNewCustomerCreated(created);
+
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
           resetCustomerForm();
-          fetchCustomers();
+
+          // 🔄 Riallinea con il DB (contatori inclusi)
+          await refreshData();
         } else {
           showToast.error("Error: " + responseAdd.data.error);
         }
-  
       } else {
         // ✅ Cliente nuovo: registra tutto
         const payload = {
@@ -519,28 +603,52 @@ function Dashboard() {
           company_id,
           location_id,
         };
-  
-        const responseNew = await fetch("https://api.italinks.com/valet/add_customers.php", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-  
+
+        const responseNew = await fetch(
+          "https://api.italinks.com/valet/add_customers.php",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+
         const dataNew = await responseNew.json();
-  
+
         if (dataNew.success) {
+          const created =
+            dataNew.customer ??
+            {
+              customer_id: dataNew.customer_id ?? Date.now(),
+              tag_number: Number(customerData.tag_number),
+              status: "IN", // tipicamente all'ingresso
+              first_name: customerData.first_name || "",
+              last_name: customerData.last_name || "",
+              phone_number: customerData.phone_number,
+              vehicle_model: customerData.vehicle_model || "",
+              color: customerData.color || "",
+              created_at: new Date().toISOString(),
+            };
+
+          // 🔵 Ottimistico
+          onNewCustomerCreated(created);
+
           showToast.success("Customer added successfully!");
           setShowFormModal(false);
           resetCustomerForm();
-          fetchCustomers();
+
+          // 🔄 Riallinea con il DB
+          await refreshData();
         } else {
           showToast.error("Error: " + dataNew.error);
         }
       }
     } catch (error) {
+      console.error("handleSubmit error:", error);
       showToast.error("Connection error");
     }
   };
+
 
 
 
@@ -588,44 +696,136 @@ function Dashboard() {
       setTimeout(() => setHighlightTag(false), 1500);
       return;
     }
-  
+
     try {
-      const response = await axios.post("https://api.italinks.com/valet/add_existing_customer.php", {
-        customer_id: existingCustomer.customer_id,
-        tag_number: parseInt(customerData.tag_number),
-        location_id: locationId,
-        company_id: companyId
-      });
-  
+      const response = await axios.post(
+        "https://api.italinks.com/valet/add_existing_customer.php",
+        {
+          customer_id: existingCustomer.customer_id,
+          tag_number: parseInt(customerData.tag_number, 10),
+          location_id: locationId,
+          company_id: companyId,
+        }
+      );
+
       if (response.data.success) {
+        const created =
+          response.data.customer ??
+          {
+            customer_id:
+              response.data.customer_id ??
+              existingCustomer.customer_id ??
+              Date.now(),
+            tag_number: Number(customerData.tag_number),
+            status: "IN",
+            first_name: existingCustomer.first_name || "",
+            last_name: existingCustomer.last_name || "",
+            phone_number: existingCustomer.phone_number || "",
+            vehicle_model: existingCustomer.vehicle_model || "",
+            color: existingCustomer.color || "",
+            created_at: new Date().toISOString(),
+          };
+
+        // 🔵 Ottimistico
+        onNewCustomerCreated(created);
+
         showToast.success("Existing customer added successfully!");
         setShowExistingModal(false);
         setShowFormModal(false);
         resetCustomerForm();
-        fetchCustomers();
+
+        // 🔄 Riallinea col DB
+        await refreshData();
       } else {
         showToast.error("Error: " + response.data.error);
       }
     } catch (error) {
+      console.error("handleUseExistingCustomer error:", error);
       showToast.error("Server Error.");
     }
   };
   
+  const getRecordById = React.useCallback(
+    (id) =>
+      (customers ?? []).find((c) => c.customer_id === id) ||
+      (overnights ?? []).find((c) => c.customer_id === id) ||
+      null,
+    [customers, overnights]
+  );
+
+  const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
+  const isInTodayList = (id) => (customers ?? []).some(c => c.customer_id === id);
+
+  // ⬇️ versione nuova: mai modificare totalToday qui
+  const bumpCountersOptimistic = (prevStatus, nextStatus, fromToday) => {
+    setCountersLive((prev) => {
+      let { nowCount, outCount, totalToday, overnightCount } = prev;
+
+      if (nextStatus === "OUT") {
+        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
+        outCount += 1;                        // OUT oggi sale
+        // totalToday invariato
+        if (prevStatus === "OVERNIGHT") {
+          overnightCount = Math.max(0, overnightCount - 1);
+        }
+      } else if (nextStatus === "OVERNIGHT") {
+        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
+        overnightCount += 1;                  // va tra gli overnight all-time
+        // totalToday invariato
+      } else if (isNow(nextStatus)) {
+        if (fromToday && !isNow(prevStatus)) {
+          nowCount += 1;                      // es. OUT→IN (oggi)
+        }
+        // totalToday invariato
+      }
+
+      return { nowCount, outCount, totalToday, overnightCount };
+    });
+  };
+
+  const onNewCustomerCreated = React.useCallback((newCustomer) => {
+    if (!newCustomer) return;
+
+    // Log corretto
+    console.log("🟡 Nuovo customer creato:", newCustomer);
+
+    // UI: aggiungi alla lista di oggi
+    setCustomers((prev) => [newCustomer, ...(prev ?? [])]);
+
+    // Se nasce già overnight, aggiungilo anche lì
+    if (newCustomer.status === "OVERNIGHT") {
+      setOvernights((prev) => [newCustomer, ...(prev ?? [])]);
+    }
+
+    // Contatori ottimistici (log PRIMA/DOPO dentro il setState per evitare deps)
+    setCountersLive((prev) => {
+      console.log("📊 Contatori PRIMA:", prev);
+      const next = {
+        ...prev,
+        nowCount: prev.nowCount + (isNow(newCustomer.status) ? 1 : 0),
+        overnightCount:
+          prev.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
+      };
+      console.log("📊 Contatori DOPO:", next);
+      return next;
+    });
+  }, []);
+
   const updateStatus = async (customer_id, status, opts = {}) => {
-    // 🔎 stato corrente per rollback
+    // snapshot per rollback
     const snapshotCustomers = customers;
     const snapshotOvernights = overnights;
 
-    // tag_number: usa quello passato o quello del selectedCustomer
-    const tag_number = opts.tag_number ?? selectedCustomer?.tag_number ?? null;
+    // trova il record in customers OPPURE in overnights
+    const current = getRecordById(customer_id);
 
-    // trova il record corrente
-    const current = customers.find((c) => c.customer_id === customer_id);
-    if (!current) {
-      showToast.error("Customer not found");
-      return;
+    // tag_number necessario per l'API: passa quello dal caller, oppure quello nel record, oppure quello del selected
+    const tag_number = opts.tag_number ?? current?.tag_number ?? selectedCustomer?.tag_number ?? null;
+    if (!tag_number) {
+      // possiamo comunque tentare, ma avvisa che manca il tag (dipende dalle esigenze del backend)
+      console.warn("updateStatus: missing tag_number, proceeding anyway");
     }
-    
+  
 
     // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
     if (status === "OVERNIGHT") {
@@ -640,12 +840,13 @@ function Dashboard() {
         )
       );
       setOvernights((prev) => {
-        const updated = { ...current, status: "OVERNIGHT", touchedAt: Date.now() };
-        const exists = prev.some((c) => c.customer_id === customer_id);
+        const base = current ?? { customer_id, tag_number };
+        const updated = { ...base, status: "OVERNIGHT", touchedAt: Date.now() };        const exists = prev.some((c) => c.customer_id === customer_id);
         return exists
           ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
           : [updated, ...prev];
       });
+      bumpCountersOptimistic(current?.status ?? "IN", "OVERNIGHT", isInTodayList(customer_id));
     } else if (status === "OUT") {
       // segna OUT subito e rimuovilo dagli overnights se c’era
       setCustomers((prev) =>
@@ -663,8 +864,10 @@ function Dashboard() {
         )
       );
       setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
+      bumpCountersOptimistic(current?.status ?? "IN", "OUT", isInTodayList(customer_id));
+    } else {
+      bumpCountersOptimistic(current?.status ?? "IN", status, isInTodayList(customer_id));
     }
-
     try {
       // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
       const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
@@ -716,7 +919,7 @@ function Dashboard() {
         // se è OVERNIGHT e non era già stato trattato in ottimistico (es. se in futuro togli l’ottimistico), aggiungilo
         if (status === "OVERNIGHT") {
           setOvernights((prev) => {
-            const updated = customers.find((c) => c.customer_id === customer_id) || current;
+            const updated = (customers ?? []).find((x) => x.customer_id === customer_id) || current || { customer_id, tag_number };            
             const exists = prev.some((c) => c.customer_id === customer_id);
             return exists
               ? prev.map((c) => (c.customer_id === customer_id ? { ...updated, status: "OVERNIGHT" } : c))
@@ -731,9 +934,10 @@ function Dashboard() {
             ? "Checkout completed"
             : `Status updated to ${status}`
         );
-
+        
         // chiudi eventuale popup
         setSelectedCustomer(null);
+        await refreshData();
       } else {
         // ❌ rollback
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
@@ -794,14 +998,15 @@ function Dashboard() {
 
           {/* Contatori */}
           <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-            <div className="text-black-600">TOT: {inToday}</div>
-            <div className="text-black-600">NOW: {nowCount}</div>
-            <div className="text-black-600">OUT: {outCount}</div>
+            <div className="text-black-600">TOT: {counters.totalToday}</div>
+            <div className="text-black-600">NOW: {counters.nowCount}</div>
+            <div className="text-black-600">OUT: {counters.outCount}</div>
 
-            {countOvernight > 0 && (
-              <div className="text-black-600">OVN: {countOvernight}</div>
+            {countersLive.overnightCount > 0 && (
+              <div className="text-black-600">OVN: {countersLive.overnightCount}</div>
             )}
           </div>
+
 
           {/* Bottone impostazioni */}
           <button onClick={() => setShowSettingsModal(true)}>
@@ -985,13 +1190,14 @@ function Dashboard() {
       {selectedCustomer && (
         <div className="fixed bottom-0 left-0 right-0 bg-white px-6 py-4 shadow-inner border-t z-50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div className="text-left w-full sm:w-1/2">
-            <div className="font-semibold text-lg">{selectedCustomer.first_name} {selectedCustomer.last_name}</div>
+            <div className="font-semibold text-lg">{selectedCustomer.first_name}{" "}{selectedCustomer.last_name}</div>
             <div className="text-sm">{selectedCustomer.phone_number}</div>
             <div className="text-sm">{selectedCustomer.vehicle_model} - {selectedCustomer.color}</div>
             <div className="text-sm">Status: {selectedCustomer.status}</div>
           </div>
           <div className="flex justify-center items-center w-full sm:w-1/2 gap-10">
             {selectedCustomer.status === "OVERNIGHT" ? (
+
               <button
                 className="bg-red-600 text-white w-40 h-20 rounded-md text-md font-semibold"
                 onClick={() =>
@@ -1000,6 +1206,7 @@ function Dashboard() {
                     status: "OUT",
                     label: "Checkout",
                     updateStatus,
+                    tag_number: selectedCustomer.tag_number,
                   })
                 }              >
                 Checkout
@@ -1015,6 +1222,7 @@ function Dashboard() {
                       status: "PENDING",
                       label: "Request Vehicle",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1029,6 +1237,7 @@ function Dashboard() {
                       status: "CARE",
                       label: "Care",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1043,6 +1252,7 @@ function Dashboard() {
                       status: "OVERNIGHT",
                       label: "Overnight",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1057,6 +1267,7 @@ function Dashboard() {
                       status: "OUT",
                       label: "Checkout",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >
@@ -1071,6 +1282,7 @@ function Dashboard() {
                       status: "IN",
                       label: "Repark",
                       updateStatus,
+                      tag_number: selectedCustomer.tag_number,
                     })
                   }
                                   >

@@ -72,30 +72,25 @@ function Dashboard() {
   const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
   const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
 
-  // Contatori ricevuti dal server (con fallback)
-  const [countersLive, setCountersLive] = React.useState({
-    nowCount: 0,
-    outCount: 0,
-    totalToday: 0,
-    overnightCount: 0,
-  });
-  // prevCountersRef per SWR in caso di fetch fallita
-  const prevCountersRef = React.useRef({ nowCount: 0, outCount: 0, totalToday: 0, overnightCount: 0 });
-  React.useEffect(() => { prevCountersRef.current = countersLive; }, [countersLive]);
+  // Nessun valore iniziale => evitiamo "0" durante il caricamento
+  const [countersLive, setCountersLive] = React.useState(null);
+
+  // Ultimo counters valido (fallback se il fetch fallisce o arriva fuori ordine)
+  const lastCountersRef = React.useRef(null);
+  React.useEffect(() => {
+    if (countersLive) lastCountersRef.current = countersLive;
+  }, [countersLive]);
+
+  const [isDataLoading, setIsDataLoading] = React.useState(false);
+
+  // Quando ti serve leggere i contatori nel render:
+  const counters = countersLive ?? lastCountersRef.current; // <-- usa questo
 
   const prevCustomersRef = React.useRef([]);
   const prevOvernightsRef = React.useRef([]);
 
   React.useEffect(() => { prevCustomersRef.current = customers; }, [customers]);
   React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
-
-  // Evita flash/zeri durante i refresh
-  const lastCountersRef = React.useRef(countersLive);
-  React.useEffect(() => {
-    if (!isLoading) lastCountersRef.current = countersLive;
-  }, [isLoading, countersLive]);
-
-  const counters = isLoading ? lastCountersRef.current : countersLive;
 
   // callback & helpers /////////////////////////
 
@@ -140,78 +135,106 @@ function Dashboard() {
       return;
     }
 
+    setIsDataLoading(true);
     try {
-      const activeReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
-        company_id: companyId,
-        location_id: locationId,
-        timeRange: "today",
-        status: "ACTIVE_ONLY",
-      }).catch(() => null);
+      // 0) Aggiornamento OVERNIGHT (soft): se fallisce non blocca il resto
+      try {
+        await axios.post(
+          "https://api.italinks.com/valet/update_overnight.php",
+          { company_id: companyId, location_id: locationId },
+          { timeout: 10000 }
+        );
+      } catch (_) {}
 
-      const outReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
-        company_id: companyId,
-        location_id: locationId,
-        timeRange: "today",
-        status: "OUT",
-      }).catch(() => null);
+      // 1) Fetch paralleli – niente .catch(() => null)
+      const activeReq = axios.post(
+        "https://api.italinks.com/valet/get_customers.php",
+        { company_id: companyId, location_id: locationId, timeRange: "today", status: "ACTIVE_ONLY" },
+        { timeout: 10000 }
+      );
 
-      // 👇 niente timeRange: alcuni backend lo ignorano con OVERNIGHT
-      const overnightReq = axios.post("https://api.italinks.com/valet/get_customers.php", {
-        company_id: companyId,
-        location_id: locationId,
-        status: "OVERNIGHT",
-      }).catch(() => null);
+      const outReq = axios.post(
+        "https://api.italinks.com/valet/get_customers.php",
+        { company_id: companyId, location_id: locationId, timeRange: "today", status: "OUT" },
+        { timeout: 10000 }
+      );
 
-      const countersReq = axios.post("https://api.italinks.com/valet/get_counters.php", {
-        company_id: companyId,
-        location_id: locationId,
-      }).catch(() => null);
+      // niente timeRange per OVERNIGHT
+      const overnightReq = axios.post(
+        "https://api.italinks.com/valet/get_customers.php",
+        { company_id: companyId, location_id: locationId, status: "OVERNIGHT" },
+        { timeout: 10000 }
+      );
 
-      const [resActive, resOut, resOver, resCounters] =
-        await Promise.all([activeReq, outReq, overnightReq, countersReq]);
+      const countersReq = axios.post(
+        "https://api.italinks.com/valet/get_counters.php",
+        { company_id: companyId, location_id: locationId },
+        { timeout: 10000 }
+      );
 
-      // Fallback ATTIVI se ACTIVE_ONLY non esiste
+      const [resActive, resOut, resOver, resCounters] = await Promise.all([
+        activeReq, outReq, overnightReq, countersReq
+      ]);
+
+      // 2) ATTIVI: se ACTIVE_ONLY non esiste, fallback a IN/PENDING/CARE
       let activeToday = resActive?.data?.customers;
       if (!Array.isArray(activeToday)) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" }),
-          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" }),
-          axios.post("https://api.italinks.com/valet/get_customers.php", { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" }),
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "IN" },
+            { timeout: 10000 }
+          ),
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "PENDING" },
+            { timeout: 10000 }
+          ),
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
+            { company_id: companyId, location_id: locationId, timeRange: "today", status: "CARE" },
+            { timeout: 10000 }
+          ),
         ]);
         activeToday = [
-          ...(rIn?.data?.customers ?? []),
-          ...(rPend?.data?.customers ?? []),
-          ...(rCare?.data?.customers ?? []),
+          ...(Array.isArray(rIn?.data?.customers)   ? rIn.data.customers   : []),
+          ...(Array.isArray(rPend?.data?.customers) ? rPend.data.customers : []),
+          ...(Array.isArray(rCare?.data?.customers) ? rCare.data.customers : []),
         ];
       }
 
-      const outToday       = resOut?.data?.customers ?? [];
-      const overnightAll   = resOver?.data?.customers ?? [];
+      const outToday      = Array.isArray(resOut?.data?.customers) ? resOut.data.customers : [];
+      const overnightAll  = Array.isArray(resOver?.data?.customers) ? resOver.data.customers : [];
 
-      const nextActive     = Array.isArray(activeToday) ? activeToday : (prevCustomersRef.current ?? []);
-      const nextOvernights = Array.isArray(overnightAll) ? overnightAll : (prevOvernightsRef.current ?? []);
+      const nextActive     = Array.isArray(activeToday)   ? activeToday   : (prevCustomersRef.current   ?? []);
+      const nextOvernights = Array.isArray(overnightAll)  ? overnightAll  : (prevOvernightsRef.current ?? []);
 
+      // 3) Scritture ATOMICHE (mai svuotare alla cieca)
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // 🔢 contatori dal DB (records) — se fail, NON azzeriamo: teniamo i precedenti
+      // 4) Contatori: se falliscono NON azzeriamo (mostreremo l'ultimo valido)
       const c = resCounters?.data?.success ? resCounters.data : null;
+      if (c && typeof c === "object") {
+        setCountersLive({
+          nowCount:       Number(c.now_count       ?? c.nowCount       ?? 0),
+          outCount:       Number(c.out_count       ?? c.outCount       ?? 0),
+          totalToday:     Number(c.total_today     ?? c.totalToday     ?? 0),
+          overnightCount: Number(c.overnight_count ?? c.overnightCount ?? 0),
+        });
+      } else {
+        setCountersLive(null);
+      }
 
-      setCountersLive({
-        nowCount:       c ? Number(c.now_count)        : (prevCountersRef.current?.nowCount ?? nextActive.length),
-        outCount:       c ? Number(c.out_count)        : (prevCountersRef.current?.outCount ?? outToday.length),
-        totalToday:     c ? Number(c.total_today)      : (prevCountersRef.current?.totalToday ?? 0),
-        overnightCount: c ? Number(c.overnight_count)  : (prevCountersRef.current?.overnightCount ?? nextOvernights.length),
-      });
-
-      // debug temporanei (rimuovi quando ok)
+      // debug (rimuovi quando ok)
       console.log("counters api:", resCounters?.data);
       console.log("active/OUT/OVN:", nextActive.length, outToday.length, nextOvernights.length);
-
     } catch (e) {
       console.error("refreshData error:", e);
-      showToast.error("Refresh failed");
+      showToast?.error?.("Refresh failed");
       // niente clear della UI
+    } finally {
+      setIsDataLoading(false);
     }
   }, [companyId, locationId]);
 
@@ -361,69 +384,6 @@ function Dashboard() {
     }
   }, [companyId, locationId, filterStatus, searchQuery, sortField, sortDir]);
 
-  const triggerOvernightUpdate = useCallback(async () => {
-    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
-      console.warn("⚠️ triggerOvernightUpdate aborted: missing locationId or companyId");
-      return;
-    }
-
-    try {
-      const res = await fetch("https://api.italinks.com/valet/update_overnight.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ company_id: companyId, location_id: locationId }),
-      });
-
-      // alcuni script PHP potrebbero non tornare JSON; non fallire se non riesci a fare res.json()
-      try {
-        const data = await res.json();
-        if (!data.success) console.warn("🌙 Overnight update: non-success", data.error);
-        // else console.log("🌙 Overnight updated:", data.count);
-      } catch {
-        // risposta non-JSON: va bene così (best-effort)
-      }
-    } catch (err) {
-      console.error("❌ Overnight update failed:", err);
-    }
-  }, [companyId, locationId]);
-
-  const fetchOvernights = useCallback(async () => {
-    if (!Number.isFinite(companyId) || !Number.isFinite(locationId)) {
-      console.warn("⚠️ fetchOvernights aborted: missing locationId or companyId");
-      return;
-    }
-
-    try {
-      const payload = {
-        location_id: locationId,
-        company_id: companyId,
-        timeRange: "overnight",
-        sortField: "arrival",
-        sortDir: "asc",
-      };
-
-      const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-      if (data.success && Array.isArray(data.customers)) {
-        setOvernights(
-          data.customers.map((c) => ({
-            ...c,
-            touchedAt: c.touchedAt || c.created_at,
-          }))
-        );
-      } else {
-        console.warn("Overnight fetch failed:", data);
-      }
-    } catch (e) {
-      console.error("Overnight fetch error:", e);
-    }
-  }, [companyId, locationId]);
-
   // useEffect /////////////////////////
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
@@ -502,11 +462,8 @@ function Dashboard() {
   };
 
   useEffect(() => {
-    (async () => {
-      await triggerOvernightUpdate();
-      await fetchOvernights();
-    })();
-  }, [triggerOvernightUpdate, fetchOvernights]);
+    refreshData();
+  }, [refreshData]);
   
 
   const handleChange = (e) => {
@@ -943,7 +900,7 @@ function Dashboard() {
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
         setCustomers(snapshotCustomers);
         setOvernights(snapshotOvernights);
-        refreshData?.();
+        await refreshData();
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
@@ -951,7 +908,7 @@ function Dashboard() {
       // ❌ rollback
       setCustomers(snapshotCustomers);
       setOvernights(snapshotOvernights);
-      refreshData?.();
+      await refreshData();
     }
   };
 
@@ -998,12 +955,17 @@ function Dashboard() {
 
           {/* Contatori */}
           <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-            <div className="text-black-600">TOT: {counters.totalToday}</div>
-            <div className="text-black-600">NOW: {counters.nowCount}</div>
-            <div className="text-black-600">OUT: {counters.outCount}</div>
-
-            {countersLive.overnightCount > 0 && (
-              <div className="text-black-600">OVN: {countersLive.overnightCount}</div>
+            <div className="text-black-600">
+              TOT: {isDataLoading ? "…" : (counters ? counters.totalToday : "—")}
+            </div>
+            <div className="text-black-600">
+              NOW: {isDataLoading ? "…" : (counters ? counters.nowCount : "—")}
+            </div>
+            <div className="text-black-600">
+              OUT: {isDataLoading ? "…" : (counters ? counters.outCount : "—")}
+            </div>
+            {counters && counters.overnightCount > 0 && (
+              <div className="text-black-600">OVN: {counters.overnightCount}</div>
             )}
           </div>
 
