@@ -182,7 +182,7 @@ function Dashboard() {
       } catch (_) {}
 
       // 1) Fetch paralleli principali
-      const [resActive, resOut, resOver, resCounters] = await Promise.all([
+      const [resActive, resOver, resCounters] = await Promise.all([
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
@@ -190,12 +190,7 @@ function Dashboard() {
         ),
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "OUT" },
-          { timeout: 10000 }
-        ),
-        axios.post(
-          "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, status: "OVERNIGHT" }, // niente timeRange
+          { company_id: companyIdNum, location_id: locationIdNum,timeRange: "overnight" }, /*, status: "OVERNIGHT"*/
           { timeout: 10000 }
         ),
         axios.post(
@@ -205,11 +200,23 @@ function Dashboard() {
         ),
       ]);
 
+      // Estrazione inline, compatibile con .customers o .data
+      const activeTodayRaw = Array.isArray(resActive?.data?.customers) ? resActive.data.customers
+                          : Array.isArray(resActive?.data?.data)      ? resActive.data.data
+                          : [];
 
-      // ---- Estrazione con helper, subito dopo Promise.all ----
-      const activeTodayRaw = extractCustomers(resActive);
-      const outToday       = extractCustomers(resOut);     // usalo solo se ti serve per debug
-      const overnightAll   = extractCustomers(resOver);
+      const overnightAll = Array.isArray(resOver?.data?.customers) ? resOver.data.customers
+                            : Array.isArray(resOver?.data?.data)    ? resOver.data.data
+                            : [];
+
+      // DEBUG
+      console.log("[RD][OVN] raw:", resOver?.data);
+      console.log("[RD][OVN] keys:", resOver?.data ? Object.keys(resOver.data) : "NO_DATA");
+      try {
+        console.log("[RD][OVN] pretty:", JSON.stringify(resOver?.data, null, 2));
+      } catch (e) {}
+
+      console.log("[RD][OVN] payload OK, overnightAll len:", overnightAll.length);
 
       // DEBUG
       console.log("[RD] resOver.raw:", resOver?.data);
@@ -300,7 +307,7 @@ function Dashboard() {
       }
 
       // (facoltativo) Debug
-      console.log("active/OUT/OVN/tags:", nextActive.length, outToday.length, nextOvernights.length, nextActiveTags.length);
+    console.log("active/OVN/tags:", nextActive.length, nextOvernights.length, nextActiveTags.length);
     } catch (e) {
       console.error("refreshData error:", e);
       showToast?.error?.("Refresh failed");
