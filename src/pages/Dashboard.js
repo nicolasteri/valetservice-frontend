@@ -291,28 +291,37 @@ function Dashboard() {
         }));
       setActiveTags(nextActiveTags);
 
-      // 5) Contatori (dopo le liste) — se la risposta non è valida, non azzeriamo
-      const c = resCounters?.data?.success ? resCounters.data : null;
+      // 5) Contatori (dopo le liste) — se la risposta non è valida, NON azzeriamo i precedenti
       if (mySeq !== refreshSeqRef.current) return;
 
-      if (c && typeof c === "object") {
-        setCountersLive({
-          nowCount:       Number(c.now_count       ?? c.nowCount       ?? 0),
-          outCount:       Number(c.out_count       ?? c.outCount       ?? 0),
-          totalToday:     Number(c.total_today     ?? c.totalToday     ?? 0),
-          overnightCount: Number(c.overnight_count ?? c.overnightCount ?? 0),
-        });
-      } else {
-        setCountersLive(null); // userai lastCountersRef come fallback in render
-      }
+      const ok = !!resCounters?.data?.success && typeof resCounters.data === "object";
+      if (ok) {
+        const d = resCounters.data;
 
-      // (facoltativo) Debug
-    console.log("active/OVN/tags:", nextActive.length, nextOvernights.length, nextActiveTags.length);
-    } catch (e) {
-      console.error("refreshData error:", e);
-      showToast?.error?.("Refresh failed");
-      // nessun reset di stato qui: manteniamo i dati precedenti
-    } finally {
+        // prendi i campi giusti dal backend; niente fallback a 0 se la chiave manca
+        const nextCounters = {
+          nowCount:       Number(d.now_count),
+          outCount:       Number(d.out_count),
+          totalToday:     Number(d.total_today),        // 👈 TOT arriva SOLO dal backend
+          overnightCount: Number(d.overnight_count),
+        };
+
+        // se anche uno solo non è un numero valido, non aggiornare (evita flash)
+        const allNumbers = Object.values(nextCounters).every((v) => Number.isFinite(v));
+        if (allNumbers) {
+          setCountersLive(nextCounters);
+          // opzionale: tieni uno “storico” se lo usi altrove
+          // lastCountersRef.current = nextCounters;
+        } else {
+          // risposta parziale/rotta: lascia i contatori precedenti
+          console.warn("[counters] risposta parziale, mantengo i precedenti:", d);
+        }
+      } else {
+        // chiamata fallita o success=false: NON toccare i contatori (niente setCountersLive(null))
+        console.warn("[counters] nessun aggiornamento (success=false o payload mancante)");
+      }
+    }
+    finally {
       setIsDataLoading(false);
     }
   }, [companyIdNum, locationIdNum]);
