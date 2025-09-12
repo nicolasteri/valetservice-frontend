@@ -112,18 +112,7 @@ function Dashboard() {
     if (locationId != null) localStorage.setItem("location_id", String(locationId));
   }, [locationId]);
 
-       // 2) Estrai liste (supporta sia .customers che .data)
-      const extractCustomers = (res) => {
-        if (!res || !res.data) return [];
-        const d = res.data;
-        if (Array.isArray(d.customers)) return d.customers;
-        if (Array.isArray(d.data)) return d.data;
-        return [];
-      };
-
   // callback & helpers /////////////////////////
-
-
 
   /* funzione di ordinamento custom per "priority"
    - Gruppi: PENDING -> CARE -> IN -> OVERNIGHT -> OUT
@@ -181,8 +170,8 @@ function Dashboard() {
         );
       } catch (_) {}
 
-      // 1) Fetch paralleli principali
-      const [resActive, resOver, resCounters] = await Promise.all([
+      // 1) Fetch paralleli principali (SENZA counters)
+      const [resActive, resOver] = await Promise.all([
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
@@ -190,48 +179,21 @@ function Dashboard() {
         ),
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum,timeRange: "overnight" }, /*, status: "OVERNIGHT"*/
-          { timeout: 10000 }
-        ),
-        axios.post(
-          "https://api.italinks.com/valet/get_counters.php",
-          { company_id: companyIdNum, location_id: locationIdNum },
+          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "overnight" },
           { timeout: 10000 }
         ),
       ]);
 
-      // Estrazione inline, compatibile con .customers o .data
+      // 2) Estrazione inline
       const activeTodayRaw = Array.isArray(resActive?.data?.customers) ? resActive.data.customers
                           : Array.isArray(resActive?.data?.data)      ? resActive.data.data
                           : [];
 
-      const overnightAll = Array.isArray(resOver?.data?.customers) ? resOver.data.customers
-                            : Array.isArray(resOver?.data?.data)    ? resOver.data.data
-                            : [];
+      const overnightAll   = Array.isArray(resOver?.data?.customers) ? resOver.data.customers
+                          : Array.isArray(resOver?.data?.data)      ? resOver.data.data
+                          : [];
 
-      // DEBUG
-      console.log("[RD][OVN] raw:", resOver?.data);
-      console.log("[RD][OVN] keys:", resOver?.data ? Object.keys(resOver.data) : "NO_DATA");
-      try {
-        console.log("[RD][OVN] pretty:", JSON.stringify(resOver?.data, null, 2));
-      } catch (e) {}
-
-      console.log("[RD][OVN] payload OK, overnightAll len:", overnightAll.length);
-
-      // DEBUG
-      console.log("[RD] resOver.raw:", resOver?.data);
-      console.log("[RD] overnightAll.length (estratto):", Array.isArray(overnightAll) ? overnightAll.length : "NA");
-
-      // Normalizza campi overnight (status/tag) in modo tollerante
-      const normalizedOvernights = Array.isArray(overnightAll)
-        ? overnightAll.map((c) => ({
-            ...c,
-            status: c?.status ?? "OVERNIGHT",
-            tag_number: c?.tag_number ?? c?.tag ?? null,
-          }))
-        : [];
-
-      // ATTIVI: fallback se ACTIVE_ONLY non esiste o torna vuoto
+      // ATTIVI: fallback se ACTIVE_ONLY è vuoto
       let activeToday = activeTodayRaw;
       if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
@@ -246,13 +208,13 @@ function Dashboard() {
             { timeout: 10000 }),
         ]);
 
-        activeToday = [
-          ...extractCustomers(rIn),
-          ...extractCustomers(rPend),
-          ...extractCustomers(rCare),
-        ];
+        const getArr = (res) =>
+          Array.isArray(res?.data?.customers) ? res.data.customers :
+          Array.isArray(res?.data?.data)      ? res.data.data      : [];
 
-        // (opzionale) dedup per sicurezza
+        activeToday = [...getArr(rIn), ...getArr(rPend), ...getArr(rCare)];
+
+        // dedup per sicurezza
         const seen = new Set();
         activeToday = activeToday.filter((c) => {
           const k = c?.customer_id;
@@ -262,23 +224,28 @@ function Dashboard() {
         });
       }
 
+      // Normalizza overnight (status/tag)
+      const normalizedOvernights = Array.isArray(overnightAll)
+        ? overnightAll.map((c) => ({
+            ...c,
+            status: c?.status ?? "OVERNIGHT",
+            tag_number: c?.tag_number ?? c?.tag ?? null,
+          }))
+        : [];
+
       // Se è partito un altro refresh nel frattempo, non scrivere
       if (mySeq !== refreshSeqRef.current) return;
 
-      // 3) Scritture ATOMICHE delle liste
+      // 3) Scritture ATOMICHE delle liste (prima le liste, poi counters)
       const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
       const nextOvernights = normalizedOvernights.length > 0
         ? normalizedOvernights
         : (prevOvernightsRef.current ?? []);
 
-      setOvernights(nextOvernights);
       setCustomers(nextActive);
+      setOvernights(nextOvernights);
 
-      // DEBUG
-      console.log("[RD] setOvernights ->", nextOvernights.length);
-      //
-
-      // 4) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE) — gli OVERNIGHT restano nella loro sezione
+      // 4) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE)
       const nextActiveTags = nextActive
         .filter((c) => c && c.tag_number && ["IN", "PENDING", "CARE"].includes(c.status))
         .map((c) => ({
@@ -291,37 +258,47 @@ function Dashboard() {
         }));
       setActiveTags(nextActiveTags);
 
-      // 5) Contatori (dopo le liste) — se la risposta non è valida, NON azzeriamo i precedenti
+      // 5) Counters: fetch SEPARATA e tollerante (non blocca la UI)
+      let resCounters = null;
+      try {
+        resCounters = await axios.post(
+          "https://api.italinks.com/valet/get_counters.php",
+          { company_id: companyIdNum, location_id: locationIdNum },
+          { timeout: 10000 }
+        );
+      } catch (err) {
+        console.warn("[counters] fetch failed:", err?.message || err);
+      }
+
       if (mySeq !== refreshSeqRef.current) return;
 
       const ok = !!resCounters?.data?.success && typeof resCounters.data === "object";
       if (ok) {
         const d = resCounters.data;
-
-        // prendi i campi giusti dal backend; niente fallback a 0 se la chiave manca
         const nextCounters = {
           nowCount:       Number(d.now_count),
           outCount:       Number(d.out_count),
-          totalToday:     Number(d.total_today),        // 👈 TOT arriva SOLO dal backend
+          totalToday:     Number(d.total_today),       // TOT solo dal backend
           overnightCount: Number(d.overnight_count),
         };
-
-        // se anche uno solo non è un numero valido, non aggiornare (evita flash)
         const allNumbers = Object.values(nextCounters).every((v) => Number.isFinite(v));
         if (allNumbers) {
-          setCountersLive(nextCounters);
-          // opzionale: tieni uno “storico” se lo usi altrove
-          // lastCountersRef.current = nextCounters;
+          setCountersLive(nextCounters); // aggiorna senza flash
         } else {
-          // risposta parziale/rotta: lascia i contatori precedenti
-          console.warn("[counters] risposta parziale, mantengo i precedenti:", d);
+          console.warn("[counters] payload parziale, mantengo i precedenti:", d);
         }
       } else {
-        // chiamata fallita o success=false: NON toccare i contatori (niente setCountersLive(null))
-        console.warn("[counters] nessun aggiornamento (success=false o payload mancante)");
+        console.warn("[counters] counters non aggiornati (success=false o 500)");
+        // non tocchiamo countersLive → niente flash
       }
-    }
-    finally {
+
+      // (facoltativo) Debug
+      console.log("active/OVN/tags:", nextActive.length, nextOvernights.length, nextActiveTags.length);
+    } catch (e) {
+      console.error("refreshData error:", e);
+      showToast?.error?.("Refresh failed");
+      // niente reset: manteniamo dati precedenti
+    } finally {
       setIsDataLoading(false);
     }
   }, [companyIdNum, locationIdNum]);
