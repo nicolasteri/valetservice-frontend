@@ -1,16 +1,18 @@
 // src/api.js
 import axios from "axios";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://api.italinks.com/valet";
+// CRA: le env si leggono da process.env.REACT_APP_*
+const API_BASE =
+  process.env.REACT_APP_API_BASE || "https://api.italinks.com/valet";
 
 export const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true, // <<< manda e legge il cookie "vsid" HttpOnly
+  withCredentials: true, // invia/legge il cookie HttpOnly "vsid"
   headers: { "Content-Type": "application/json" },
 });
 
-// Log solo in dev
-if (import.meta.env.DEV) {
+// Log solo in sviluppo
+if (process.env.NODE_ENV !== "production") {
   api.interceptors.response.use(
     (r) => r,
     (err) => {
