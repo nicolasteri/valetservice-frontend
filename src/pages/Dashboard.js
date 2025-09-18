@@ -10,7 +10,12 @@ import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
 // Ordine di visualizzazione: più basso = più in alto nella dashboard
 import { useCountersAirbag } from "../utils/dashboard_airbags";
+import TinySpinner from "../components/TinySpinner";
+import { DEBUG } from "../utils/debug";
+
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
+
+
 
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
 
@@ -78,6 +83,7 @@ function Dashboard() {
   const counters = getCountersSafe();
 
   const [activeTags, setActiveTags] = React.useState([]);
+
   const prevActiveTagsRef = React.useRef([]);
   React.useEffect(() => { prevActiveTagsRef.current = activeTags; }, [activeTags]);
 
@@ -89,6 +95,8 @@ function Dashboard() {
 
   React.useEffect(() => { prevCustomersRef.current = customers; }, [customers]);
   React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
+
+  const abortRef = React.useRef(null);
 
   // Subito dopo aver letto da localStorage:
 
@@ -158,9 +166,17 @@ function Dashboard() {
     // Sequencer anti-race: solo l’ultimo refresh può scrivere
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
 
+    // Cancella eventuali fetch in corso e prepara un nuovo AbortController
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+    }
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
+
     setIsDataLoading(true);
+
     try {
-      // 0) Soft update OVERNIGHT (se fallisce, non blocca)
+      // 0) Soft update OVERNIGHT (se fallisce, non blocca; niente signal)
       try {
         await axios.post(
           "https://api.italinks.com/valet/update_overnight.php",
@@ -169,42 +185,52 @@ function Dashboard() {
         );
       } catch (_) {}
 
-      // 1) Fetch paralleli principali (SENZA counters)
+      // 1) Fetch paralleli principali (SENZA counters) — con cancellazione (signal)
       const [resActive, resOver] = await Promise.all([
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
-          { timeout: 10000 }
+          { timeout: 10000, signal }
         ),
         axios.post(
           "https://api.italinks.com/valet/get_customers.php",
           { company_id: companyIdNum, location_id: locationIdNum, timeRange: "overnight" },
-          { timeout: 10000 }
+          { timeout: 10000, signal }
         ),
       ]);
 
       // 2) Estrazione inline
-      const activeTodayRaw = Array.isArray(resActive?.data?.customers) ? resActive.data.customers
-                          : Array.isArray(resActive?.data?.data)      ? resActive.data.data
-                          : [];
+      const activeTodayRaw = Array.isArray(resActive?.data?.customers)
+        ? resActive.data.customers
+        : Array.isArray(resActive?.data?.data)
+        ? resActive.data.data
+        : [];
 
-      const overnightAll   = Array.isArray(resOver?.data?.customers) ? resOver.data.customers
-                          : Array.isArray(resOver?.data?.data)      ? resOver.data.data
-                          : [];
+      const overnightAll = Array.isArray(resOver?.data?.customers)
+        ? resOver.data.customers
+        : Array.isArray(resOver?.data?.data)
+        ? resOver.data.data
+        : [];
 
-      // ATTIVI: fallback se ACTIVE_ONLY è vuoto
+      // 3) ATTIVI: fallback se ACTIVE_ONLY è vuoto → IN/PENDING/CARE
       let activeToday = activeTodayRaw;
       if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post("https://api.italinks.com/valet/get_customers.php",
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
             { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" },
-            { timeout: 10000 }),
-          axios.post("https://api.italinks.com/valet/get_customers.php",
+            { timeout: 10000, signal }
+          ),
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
             { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" },
-            { timeout: 10000 }),
-          axios.post("https://api.italinks.com/valet/get_customers.php",
+            { timeout: 10000, signal }
+          ),
+          axios.post(
+            "https://api.italinks.com/valet/get_customers.php",
             { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" },
-            { timeout: 10000 }),
+            { timeout: 10000, signal }
+          ),
         ]);
 
         const getArr = (res) =>
@@ -223,7 +249,7 @@ function Dashboard() {
         });
       }
 
-      // Normalizza overnight (status/tag)
+      // 4) Normalizza overnight (status/tag)
       const normalizedOvernights = Array.isArray(overnightAll)
         ? overnightAll.map((c) => ({
             ...c,
@@ -235,7 +261,7 @@ function Dashboard() {
       // Se è partito un altro refresh nel frattempo, non scrivere
       if (mySeq !== refreshSeqRef.current) return;
 
-      // 3) Scritture ATOMICHE delle liste (prima le liste, poi counters)
+      // 5) Scritture ATOMICHE delle liste (prima liste, poi counters)
       const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
       const nextOvernights = normalizedOvernights.length > 0
         ? normalizedOvernights
@@ -244,9 +270,10 @@ function Dashboard() {
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
-      // 4) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE)
+      // 6) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE)
+      const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
       const nextActiveTags = nextActive
-        .filter((c) => c && c.tag_number && ["IN", "PENDING", "CARE"].includes(c.status))
+        .filter((c) => c && c.tag_number && isNow(c.status))
         .map((c) => ({
           customer_id: c.customer_id,
           tag_number:  c.tag_number,
@@ -257,43 +284,50 @@ function Dashboard() {
         }));
       setActiveTags(nextActiveTags);
 
-      // 5) Counters: fetch SEPARATA e tollerante (non blocca la UI)
+      // 7) Counters: fetch SEPARATA e tollerante (NO signal: non la abortiamo)
       let resCounters = null;
       try {
         resCounters = await axios.post(
           "https://api.italinks.com/valet/get_counters.php",
           { company_id: companyIdNum, location_id: locationIdNum },
           { timeout: 10000 }
-        ).catch(() => null); // 👈 evita throw su 500
+        ).catch(() => null);
       } catch (err) {
-        console.warn("[counters] fetch failed:", err?.message || err);
+        if (DEBUG) console.warn("[counters] fetch failed:", err?.message || err);
       }
 
       if (mySeq !== refreshSeqRef.current) return;
 
-      // 👇 usa l’airbag: aggiorna SOLO se payload completo/valido (mai azzerare)
+      // aggiorna i contatori SOLO se payload valido (mai azzerare)
       const ok = applyCountersFromResponse(resCounters);
       if (!ok) {
-        console.warn("[counters] non aggiornati (success=false / 500 / payload incompleto)");
+       if (DEBUG) console.warn("[counters] non aggiornati (success=false / 500 / payload incompleto)");
       }
 
-      // (facoltativo) Debug
-      console.log("active/OVN/tags:", nextActive.length, nextOvernights.length, nextActiveTags.length);
-    
     } catch (e) {
       console.error("refreshData error:", e);
       showToast?.error?.("Refresh failed");
       // niente reset: manteniamo dati precedenti
     } finally {
+      // cleanup AbortController di questo giro
+      abortRef.current = null;
       setIsDataLoading(false);
     }
   }, [companyIdNum, locationIdNum, applyCountersFromResponse]);
 
   useEffect(() => {
-    console.log("[RD] start");
+    if (DEBUG) console.log("[RD] start");
     refreshData();
   }, [refreshData]);
   // fine debug
+
+  const refreshDebounceRef = React.useRef(null);
+  const refreshSoon = React.useCallback((delay = 300) => {
+    if (refreshDebounceRef.current) clearTimeout(refreshDebounceRef.current);
+    refreshDebounceRef.current = setTimeout(() => {
+      refreshData();
+    }, delay);
+  }, [refreshData]);
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -466,9 +500,9 @@ function Dashboard() {
     const locationIdRaw = localStorage.getItem("location_id");
     const storedLocationName = localStorage.getItem("location_name");
 
-    console.log("🚨 DASHBOARD localStorage check:");
-    console.log("company_id (raw):", companyIdRaw);
-    console.log("location_id (raw):", locationIdRaw);
+    if (DEBUG) console.log("🚨 DASHBOARD localStorage check:");
+    if (DEBUG) console.log("company_id (raw):", companyIdRaw);
+    if (DEBUG) console.log("location_id (raw):", locationIdRaw);
 
     const parsedCompanyId = parseInt(companyIdRaw, 10);
     const parsedLocationId = parseInt(locationIdRaw, 10);
@@ -837,8 +871,6 @@ function Dashboard() {
   const onNewCustomerCreated = React.useCallback((newCustomer) => {
     if (!newCustomer) return;
 
-    console.log("🟡 Nuovo customer creato:", newCustomer);
-
     // UI: aggiungi alla lista di oggi
     setCustomers((prev) => [newCustomer, ...(prev ?? [])]);
 
@@ -860,13 +892,16 @@ function Dashboard() {
         overnightCount: base.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
       };
 
-      console.log("📊 Contatori PRIMA (safe):", base);
-      console.log("📊 Contatori DOPO (optimistic):", next);
+      if (DEBUG) console.log("📊 Contatori PRIMA (safe):", base);
+      if (DEBUG) console.log("📊 Contatori DOPO (optimistic):", next);
       return next;
     });
   }, [setCustomers, setOvernights, setCountersLive, getCountersSafe]);
 
   const updateStatus = async (customer_id, status, opts = {}) => {
+    // read counters safely (never null)
+    //const cSafe = getCountersSafe();
+
     // snapshot per rollback
     const snapshotCustomers = customers;
     const snapshotOvernights = overnights;
@@ -992,13 +1027,13 @@ function Dashboard() {
         
         // chiudi eventuale popup
         setSelectedCustomer(null);
-        await refreshData();
+        refreshSoon(300);
       } else {
         // ❌ rollback
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
         setCustomers(snapshotCustomers);
         setOvernights(snapshotOvernights);
-        await refreshData();
+        refreshSoon(300);
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
@@ -1006,7 +1041,7 @@ function Dashboard() {
       // ❌ rollback
       setCustomers(snapshotCustomers);
       setOvernights(snapshotOvernights);
-      await refreshData();
+      refreshSoon(300);
     }
   };
 
@@ -1037,7 +1072,7 @@ function Dashboard() {
     <div className="flex flex-col h-screen"> 
   
 
-      {/* NAV BAR */}
+        {/* NAV BAR */}
         <div className="flex justify-between items-center bg-white px-6 py-3 shadow z-20">
 
           {/* Nome + Icone connessione */}
@@ -1052,21 +1087,20 @@ function Dashboard() {
           </div>
 
           {/* Contatori */}
-          <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
-            <div className="text-black-600">
-              TOT: {isDataLoading ? "…" : (counters ? counters.totalToday : "—")}
+          <div className="flex items-center justify-between">
+            <div className="flex gap-6 items-center text-sm font-semibold bg-gray-100 p-2 rounded-md">
+              <div className="text-black-600">TOT: {counters.totalToday}</div>
+              <div className="text-black-600">NOW: {counters.nowCount}</div>
+              <div className="text-black-600">OUT: {counters.outCount}</div>
+              {counters.overnightCount > 0 && (
+                <div className="text-black-600">OVN: {counters.overnightCount}</div>
+              )}
             </div>
-            <div className="text-black-600">
-              NOW: {isDataLoading ? "…" : (counters ? counters.nowCount : "—")}
-            </div>
-            <div className="text-black-600">
-              OUT: {isDataLoading ? "…" : (counters ? counters.outCount : "—")}
-            </div>
-            {counters && counters.overnightCount > 0 && (
-              <div className="text-black-600">OVN: {counters.overnightCount}</div>
-            )}
-          </div>
 
+            {/* Indicatore non bloccante durante il refresh */}
+            {isDataLoading && <TinySpinner title="Updating Counters…" />}
+          </div>
+          
 
           {/* Bottone impostazioni */}
           <button onClick={() => setShowSettingsModal(true)}>
@@ -1159,28 +1193,24 @@ function Dashboard() {
             </button>
           </div>
         </div>
-
+      
 
 
 
         {/* MAIN CONTENT - CLIENTI ATTUALI */}
-        <div className="relative">
-          {/* Overlay: copre solo la griglia, non la search */}
-          {isDataLoading && (
-            <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/70 backdrop-blur-sm">
-              <div className="text-xl font-semibold text-gray-500" aria-live="polite">
-                Loading dashboard...
-              </div>
-            </div>
-          )}
+        <section className="mt-6">
+          <h3 className="text-lg font-semibold text-gray-700 mb-2 flex items-center gap-2">
+            Active Tags <span className="text-xs text-gray-500">({sortedCustomers.length})</span>
+            {isDataLoading && <TinySpinner title="Aggiornamento attivi…" />}
+          </h3>
 
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-4 gap-4" aria-busy={isDataLoading ? "true" : "false"}>
             {sortedCustomers.map((customer) => {
               const isSelected = selectedCustomer?.customer_id === customer.customer_id;
               const isPending = customer.status === "PENDING";
               const isCare = customer.status === "CARE";
 
-              let bgColor = "bg-gray-800"; // default per IN
+              let bgColor = "bg-gray-800"; // IN (default)
               if (isPending) bgColor = "bg-[#0c6cbc]";
               else if (isCare) bgColor = "bg-[#2bca65]";
 
@@ -1215,16 +1245,18 @@ function Dashboard() {
               );
             })}
           </div>
-        </div>
+        </section>
+
 
         {/* OVERNIGHT CUSTOMERS (render only if there are items) */}
         {Array.isArray(overnights) && overnights.length > 0 && (
           <section className="mt-6">
-            <h3 className="text-lg font-semibold text-purple-700 mb-2">
+            <h3 className="text-lg font-semibold text-purple-700 mb-2 flex items-center gap-2">
               Overnight Vehicles <span className="text-xs text-gray-500">({overnights.length})</span>
+              {isDataLoading && <TinySpinner title="Aggiornamento overnight…" />}
             </h3>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" aria-busy={isDataLoading ? "true" : "false"}>
               {overnights.map((customer) => {
                 const id  = customer?.customer_id ?? customer?.id ?? `${customer?.tag_number || "tag"}-${customer?.created_at || Date.now()}`;
                 const tag = customer?.tag_number ?? customer?.tag ?? "—";
@@ -1253,6 +1285,7 @@ function Dashboard() {
             </div>
           </section>
         )}
+
 
 
 
