@@ -1,81 +1,76 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import axios from "axios";
 import { showToast } from "../utils/ui/showToast";
+import { api } from "../api";
+
+const isDev = import.meta.env.DEV;
 
 function OperatorLogin() {
   const location = useLocation();
   const navigate = useNavigate();
   const queryParams = new URLSearchParams(location.search);
-  const companyCodeRaw = queryParams.get("company_code");
+  const companyCodeRaw = queryParams.get("company_code"); // da URL, come nel tuo file
 
   const [locationCode, setLocationCode] = useState("");
-  /* const [companyId, setCompanyId] = useState(null);
 
+  // Prima controllavi localStorage company_id; ora controlliamo la query "company_code"
   useEffect(() => {
-    const storedCompanyId = localStorage.getItem("company_id");
-    if (storedCompanyId) {
-      setCompanyId(parseInt(storedCompanyId));
-    } else {
+    if (!companyCodeRaw) {
       showToast.error("Missing company reference");
       navigate("/company-login");
     }
-  }, [navigate]);
- */
-
-  useEffect(() => {
-    const storedCompanyId = localStorage.getItem("company_id");
-    if (!storedCompanyId) {
-      showToast.error("Missing company reference");
-      navigate("/company-login");
-    }
-  }, [navigate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyCodeRaw, navigate]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    const cleanCompanyCode = companyCodeRaw?.replace(/-/g, "") || "";
+    // normalizza i codici: solo cifre
+    const cleanCompanyCode = (companyCodeRaw || "").replace(/\D/g, "");
+    const cleanLocationCode = (locationCode || "").replace(/\D/g, "");
 
-    // 🧪 DEBUG START
-    console.log("Sending to API:", {
-    location_code: locationCode,
-    company_code: cleanCompanyCode,
-    });
-    // 🧪 DEBUG END
+    if (isDev) {
+      console.log("Sending to API:", {
+        location_code: cleanLocationCode,
+        company_code: cleanCompanyCode,
+      });
+    }
 
     try {
-      const response = await axios.post("https://api.italinks.com/valet/operator_login.php", {
-        location_code: locationCode,
+      const { data } = await api.post("/operator_login.php", {
+        location_code: cleanLocationCode,
         company_code: cleanCompanyCode,
       });
 
-      // 🧪 DEBUG: log della risposta dal backend
-      console.log("API response:", response.data);
+      if (isDev) console.log("API response:", data);
 
-      const data = response.data;
+      if (data?.success) {
+        // ✅ Sessione è nel cookie HttpOnly: NON salviamo IDs nel localStorage.
+        // Se la tua UI header usa i nomi da localStorage, puoi (temporaneamente) salvarne SOLO i nomi:
+        // localStorage.setItem("company_name", data.company_name);
+        // localStorage.setItem("location_name", data.location_name);
 
-      if (data.success) {
-        localStorage.setItem("company_id", data.company_id);
-        localStorage.setItem("location_id", data.location_id);
-        localStorage.setItem("company_name", data.company_name);
-        localStorage.setItem("location_name", data.location_name);
+        // (facoltativo) valida la sessione e/o carica contesto
+        try {
+          await api.get("/me.php");
+        } catch {
+          // se fallisce, non bloccare il redirect: la sessione è già attiva
+        }
 
         showToast.success(`Welcome to ${data.location_name}`);
-        console.log("✅ Dati salvati nel localStorage, pronto a navigare");
 
-        // 👇 Aspetta 100ms per assicurarti che i dati siano scritti prima del redirect
         setTimeout(() => {
-          console.log("🚀 Redirecting to dashboard...");
+          if (isDev) console.log("🚀 Redirecting to dashboard...");
           navigate("/dashboard");
-        }, 500);
+        }, 300);
+      } else {
+        showToast.error(data?.error || "Invalid location code");
       }
-      else {
-              showToast.error(data.error || "Invalid location code");
-            }
-          } catch (error) {
-            showToast.error("Server error during login");
-          }
-        };
+    } catch (error) {
+      showToast.error("Server error during login");
+      if (isDev) console.error(error);
+    }
+  };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
