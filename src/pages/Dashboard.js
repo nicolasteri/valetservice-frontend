@@ -305,9 +305,20 @@ function Dashboard() {
       }
 
     } catch (e) {
-      console.error("refreshData error:", e);
-      showToast?.error?.("Refresh failed");
-      // niente reset: manteniamo dati precedenti
+      // Ignora i refresh abortiti da un nuovo giro (è voluto)
+      const isCanceled =
+        e?.code === "ERR_CANCELED" ||               // Axios >= v1
+        (typeof axios !== "undefined" && axios.isCancel?.(e)); // fallback
+
+      if (isCanceled) {
+        // opzionale: log silenzioso in debug
+        if (typeof DEBUG !== "undefined" && DEBUG) {
+          console.log("refreshData aborted by a newer request");
+        }
+      } else {
+        console.error("refreshData error:", e);
+        showToast?.error?.("Refresh failed");
+      }
     } finally {
       // cleanup AbortController di questo giro
       abortRef.current = null;
