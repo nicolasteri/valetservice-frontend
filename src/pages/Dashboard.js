@@ -9,7 +9,7 @@ import { confirmAndUpdatePopup } from "../utils/ui/ConfirmPopup";
 import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
 // Ordine di visualizzazione: più basso = più in alto nella dashboard
-import { useCountersAirbag, DEFAULT_COUNTERS } from "../utils/dashboard_airbags";
+import { useCountersAirbag } from "../utils/dashboard_airbags";
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
@@ -67,9 +67,7 @@ function Dashboard() {
 
 
   const {
-    countersLive,
     setCountersLive,
-    prevCountersRef,
     getCountersSafe,
     applyCountersFromResponse
   } = useCountersAirbag(React);
@@ -289,7 +287,7 @@ function Dashboard() {
     } finally {
       setIsDataLoading(false);
     }
-  }, [companyIdNum, locationIdNum]);
+  }, [companyIdNum, locationIdNum, applyCountersFromResponse]);
 
   useEffect(() => {
     console.log("[RD] start");
@@ -790,7 +788,6 @@ function Dashboard() {
     [customers, overnights]
   );
 
-  const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
   const isInTodayList = (id) => (customers ?? []).some(c => c.customer_id === id);
 
   // ⬇️ versione nuova: mai modificare totalToday qui
