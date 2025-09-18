@@ -5,10 +5,11 @@ import "react-toastify/dist/ReactToastify.css";
 import Navbar from "./components/Navbar";
 import Dashboard from "./pages/Dashboard";
 import NotFoundPage from "./pages/NotFoundPage";
-import './App.css';
+import "./App.css";
 import CompanyLogin from "./pages/CompanyLogin";
 import OperatorLogin from "./pages/OperatorLogin";
 import ManagerDashboard from "./pages/ManagerDashboard";
+import ErrorBoundary from "./components/ErrorBoundary";
 // import PrivateRoute from "./components/PrivateRoute";
 
 function App() {
@@ -20,19 +21,23 @@ function App() {
       <ToastContainer position="bottom-center" autoClose={2500} />
 
       <Routes>
-        {/* Routes publiques */} 
+        {/* Routes pubbliche */}
         <Route path="/" element={<CompanyLogin />} />
         <Route path="/company-login" element={<CompanyLogin />} />
         <Route path="/operator-login" element={<OperatorLogin />} />
         <Route path="/manager-dashboard" element={<ManagerDashboard />} />
 
+        {/* Dashboard protetta dall’ErrorBoundary */}
         <Route
           path="/dashboard"
-          element={<Dashboard />} />
-            {/*<PrivateRoute>
+          element={
+            <ErrorBoundary>
+              {/* Se più avanti riattivi PrivateRoute, wrappa Dashboard qui dentro */}
               <Dashboard />
-            </PrivateRoute>*/}
-        
+            </ErrorBoundary>
+          }
+        />
+
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </>

@@ -9,6 +9,7 @@ import { confirmAndUpdatePopup } from "../utils/ui/ConfirmPopup";
 import "react-confirm-alert/src/react-confirm-alert.css";
 import { useNavigate } from "react-router-dom";
 // Ordine di visualizzazione: più basso = più in alto nella dashboard
+import { useCountersAirbag, DEFAULT_COUNTERS } from "../utils/dashboard_airbags";
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
 const isBrowser = typeof window !== "undefined" && typeof navigator !== "undefined";
@@ -64,19 +65,19 @@ function Dashboard() {
   const [sortField, setSortField] = useState("arrival"); // "priority" | "number" | "arrival" | "urgency" | "name"
   const [sortDir, setSortDir] = useState("desc");        // "asc" | "desc"
 
-  // Nessun valore iniziale => evitiamo "0" durante il caricamento
-  const [countersLive, setCountersLive] = React.useState(null);
 
-  // Ultimo counters valido (fallback se il fetch fallisce o arriva fuori ordine)
-  const lastCountersRef = React.useRef(null);
-  React.useEffect(() => {
-    if (countersLive) lastCountersRef.current = countersLive;
-  }, [countersLive]);
+  const {
+    countersLive,
+    setCountersLive,
+    prevCountersRef,
+    getCountersSafe,
+    applyCountersFromResponse
+  } = useCountersAirbag(React);
 
   const [isDataLoading, setIsDataLoading] = React.useState(false);
 
-  // Quando ti serve leggere i contatori nel render:
-  const counters = countersLive ?? lastCountersRef.current; // <-- usa questo
+  // ✅ sempre numeri, mai null
+  const counters = getCountersSafe();
 
   const [activeTags, setActiveTags] = React.useState([]);
   const prevActiveTagsRef = React.useRef([]);
@@ -265,35 +266,22 @@ function Dashboard() {
           "https://api.italinks.com/valet/get_counters.php",
           { company_id: companyIdNum, location_id: locationIdNum },
           { timeout: 10000 }
-        );
+        ).catch(() => null); // 👈 evita throw su 500
       } catch (err) {
         console.warn("[counters] fetch failed:", err?.message || err);
       }
 
       if (mySeq !== refreshSeqRef.current) return;
 
-      const ok = !!resCounters?.data?.success && typeof resCounters.data === "object";
-      if (ok) {
-        const d = resCounters.data;
-        const nextCounters = {
-          nowCount:       Number(d.now_count),
-          outCount:       Number(d.out_count),
-          totalToday:     Number(d.total_today),       // TOT solo dal backend
-          overnightCount: Number(d.overnight_count),
-        };
-        const allNumbers = Object.values(nextCounters).every((v) => Number.isFinite(v));
-        if (allNumbers) {
-          setCountersLive(nextCounters); // aggiorna senza flash
-        } else {
-          console.warn("[counters] payload parziale, mantengo i precedenti:", d);
-        }
-      } else {
-        console.warn("[counters] counters non aggiornati (success=false o 500)");
-        // non tocchiamo countersLive → niente flash
+      // 👇 usa l’airbag: aggiorna SOLO se payload completo/valido (mai azzerare)
+      const ok = applyCountersFromResponse(resCounters);
+      if (!ok) {
+        console.warn("[counters] non aggiornati (success=false / 500 / payload incompleto)");
       }
 
       // (facoltativo) Debug
       console.log("active/OVN/tags:", nextActive.length, nextOvernights.length, nextActiveTags.length);
+    
     } catch (e) {
       console.error("refreshData error:", e);
       showToast?.error?.("Refresh failed");
@@ -302,8 +290,6 @@ function Dashboard() {
       setIsDataLoading(false);
     }
   }, [companyIdNum, locationIdNum]);
- // Debug
-  console.log("IDs → companyIdNum:", companyIdNum, "locationIdNum:", locationIdNum);
 
   useEffect(() => {
     console.log("[RD] start");
@@ -808,24 +794,41 @@ function Dashboard() {
   const isInTodayList = (id) => (customers ?? []).some(c => c.customer_id === id);
 
   // ⬇️ versione nuova: mai modificare totalToday qui
+  // ⬇️ versione sicura: non toccare mai totalToday qui
   const bumpCountersOptimistic = (prevStatus, nextStatus, fromToday) => {
     setCountersLive((prev) => {
-      let { nowCount, outCount, totalToday, overnightCount } = prev;
+      // usa un "base" sicuro: se prev è nullo/rotto, ripiega su getCountersSafe()
+      const base = (prev && Number.isFinite(prev.nowCount)) ? prev : getCountersSafe();
+
+      let {
+        nowCount       = 0,
+        outCount       = 0,
+        totalToday     = 0, // NON si modifica qui
+        overnightCount = 0,
+      } = base;
+
+      const wasNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
+      const isNow  = (s) => s === "IN" || s === "PENDING" || s === "CARE";
 
       if (nextStatus === "OUT") {
-        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
-        outCount += 1;                        // OUT oggi sale
+        if (fromToday && wasNow(prevStatus)) {
+          nowCount = Math.max(0, nowCount - 1);
+        }
+        outCount += 1; // OUT oggi sale
         // totalToday invariato
         if (prevStatus === "OVERNIGHT") {
           overnightCount = Math.max(0, overnightCount - 1);
         }
       } else if (nextStatus === "OVERNIGHT") {
-        if (fromToday && isNow(prevStatus)) nowCount = Math.max(0, nowCount - 1);
-        overnightCount += 1;                  // va tra gli overnight all-time
+        if (fromToday && wasNow(prevStatus)) {
+          nowCount = Math.max(0, nowCount - 1);
+        }
+        overnightCount += 1;
         // totalToday invariato
       } else if (isNow(nextStatus)) {
-        if (fromToday && !isNow(prevStatus)) {
-          nowCount += 1;                      // es. OUT→IN (oggi)
+        // es. OUT→IN (oggi)
+        if (fromToday && !wasNow(prevStatus)) {
+          nowCount += 1;
         }
         // totalToday invariato
       }
@@ -837,7 +840,6 @@ function Dashboard() {
   const onNewCustomerCreated = React.useCallback((newCustomer) => {
     if (!newCustomer) return;
 
-    // Log corretto
     console.log("🟡 Nuovo customer creato:", newCustomer);
 
     // UI: aggiungi alla lista di oggi
@@ -848,19 +850,24 @@ function Dashboard() {
       setOvernights((prev) => [newCustomer, ...(prev ?? [])]);
     }
 
-    // Contatori ottimistici (log PRIMA/DOPO dentro il setState per evitare deps)
+    // Contatori ottimistici: parti SEMPRE da un oggetto "safe"
     setCountersLive((prev) => {
-      console.log("📊 Contatori PRIMA:", prev);
+      const base = (prev && Number.isFinite(prev.nowCount)) ? prev : getCountersSafe();
+
+      const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
+
       const next = {
-        ...prev,
-        nowCount: prev.nowCount + (isNow(newCustomer.status) ? 1 : 0),
-        overnightCount:
-          prev.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
+        nowCount:       base.nowCount + (isNow(newCustomer.status) ? 1 : 0),
+        outCount:       base.outCount,
+        totalToday:     base.totalToday, // non tocchiamo TOT qui
+        overnightCount: base.overnightCount + (newCustomer.status === "OVERNIGHT" ? 1 : 0),
       };
-      console.log("📊 Contatori DOPO:", next);
+
+      console.log("📊 Contatori PRIMA (safe):", base);
+      console.log("📊 Contatori DOPO (optimistic):", next);
       return next;
     });
-  }, []);
+  }, [setCustomers, setOvernights, setCountersLive, getCountersSafe]);
 
   const updateStatus = async (customer_id, status, opts = {}) => {
     // snapshot per rollback
