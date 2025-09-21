@@ -82,6 +82,8 @@ function Dashboard() {
   // ✅ sempre numeri, mai null
   const counters = getCountersSafe();
 
+  const [dayWindow, setDayWindow] = useState(null); // {start, end} da get_counters
+
   const [activeTags, setActiveTags] = React.useState([]);
 
   const prevActiveTagsRef = React.useRef([]);
@@ -300,8 +302,8 @@ function Dashboard() {
 
       // aggiorna i contatori SOLO se payload valido (mai azzerare)
       const ok = applyCountersFromResponse(resCounters);
-      if (!ok) {
-       if (DEBUG) console.warn("[counters] non aggiornati (success=false / 500 / payload incompleto)");
+      if (resCounters?.data?.day_window) {
+        setDayWindow(resCounters.data.day_window); // { start: "YYYY-MM-DD HH:mm:ss", end: "..." }
       }
 
     } catch (e) {
@@ -339,6 +341,48 @@ function Dashboard() {
       refreshData();
     }, delay);
   }, [refreshData]);
+
+
+  function parseMySQL(ts, assumeUTC = false) { // --- TIME HELPERS ---
+    if (!ts || ts === '0000-00-00 00:00:00') return null;
+    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
+    const d = new Date(assumeUTC ? iso + 'Z' : iso);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatElapsedTime(timestamp) {
+    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
+    if (!startDate) return "00h 00m";
+
+    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
+    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
+
+    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
+    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
+    return `${h}h ${m}m`;
+  }
+
+  function isToday(createdAt) {
+    const entry = new Date(createdAt);
+    const now = new Date();
+    const start = new Date(now);
+    const end = new Date(now);
+    start.setHours(5, 0, 0, 0);
+    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
+    end.setDate(start.getDate() + 1);
+    end.setHours(4, 59, 59, 999);
+    return entry >= start && entry <= end;
+  }
+
+  function isWithinDayWindow(ts, win) {
+    if (!ts || !win?.start || !win?.end) return false;
+    const d = new Date(String(ts).replace(' ', 'T'));
+    if (Number.isNaN(d.getTime())) return false;
+    const s = new Date(String(win.start).replace(' ', 'T'));
+    const e = new Date(String(win.end).replace(' ', 'T'));
+    return d >= s && d <= e;
+  }
+
 
   // todayCustomers + counters  ➜ PRIMA di filteredCustomers / sortedCustomers
   const todayCustomers = useMemo(() => {
@@ -381,36 +425,6 @@ function Dashboard() {
     return sortField === "priority" ? customSort(list) : list;
   }, [filteredCustomers, customers, sortField, customSort]);
 
-  function parseMySQL(ts, assumeUTC = false) { // --- TIME HELPERS ---
-    if (!ts || ts === '0000-00-00 00:00:00') return null;
-    const iso = String(ts).replace(' ', 'T');       // "YYYY-MM-DDTHH:mm:ss"
-    const d = new Date(assumeUTC ? iso + 'Z' : iso);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  function formatElapsedTime(timestamp) {
-    const startDate = parseMySQL(timestamp, /* assumeUTC? */ false);
-    if (!startDate) return "00h 00m";
-
-    const diffSec = Math.floor((currentTime - startDate.getTime()) / 1000);
-    const safe = diffSec < 0 || !Number.isFinite(diffSec) ? 0 : diffSec;
-
-    const h = String(Math.floor(safe / 3600)).padStart(2, "0");
-    const m = String(Math.floor((safe % 3600) / 60)).padStart(2, "0");
-    return `${h}h ${m}m`;
-  }
-
-  function isToday(createdAt) {
-    const entry = new Date(createdAt);
-    const now = new Date();
-    const start = new Date(now);
-    const end = new Date(now);
-    start.setHours(5, 0, 0, 0);
-    if (now.getHours() < 5) start.setDate(start.getDate() - 1);
-    end.setDate(start.getDate() + 1);
-    end.setHours(4, 59, 59, 999);
-    return entry >= start && entry <= end;
-  }
 
   // handler per cambiare il tipo di sort
   function toggleSort(field) {
@@ -458,7 +472,7 @@ function Dashboard() {
     };
 
     try {
-      const res = await fetch("https://api.italinks.com/valet/get_customers.php", {
+      const res = await fetch("get_customers.php", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -856,7 +870,7 @@ function Dashboard() {
         if (fromToday && wasNow(prevStatus)) {
           nowCount = Math.max(0, nowCount - 1);
         }
-        outCount += 1; // OUT oggi sale
+        if (fromToday) outCount += 1; // incrementa solo se contabile oggi
         // totalToday invariato
         if (prevStatus === "OVERNIGHT") {
           overnightCount = Math.max(0, overnightCount - 1);
@@ -910,9 +924,6 @@ function Dashboard() {
   }, [setCustomers, setOvernights, setCountersLive, getCountersSafe]);
 
   const updateStatus = async (customer_id, status, opts = {}) => {
-    // read counters safely (never null)
-    //const cSafe = getCountersSafe();
-
     // snapshot per rollback
     const snapshotCustomers = customers;
     const snapshotOvernights = overnights;
@@ -964,8 +975,12 @@ function Dashboard() {
           })
         )
       );
+      const createdAt = current?.created_at ?? selectedCustomer?.created_at ?? null;
+      // usa la dayWindow del server, fallback a isToday per sicurezza
+      const eligibleOutToday = isWithinDayWindow(createdAt, dayWindow) || isToday(createdAt);
       setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
-      bumpCountersOptimistic(current?.status ?? "IN", "OUT", isInTodayList(customer_id));
+
+      bumpCountersOptimistic(current?.status ?? "IN", "OUT", eligibleOutToday);
     } else {
       bumpCountersOptimistic(current?.status ?? "IN", status, isInTodayList(customer_id));
     }
