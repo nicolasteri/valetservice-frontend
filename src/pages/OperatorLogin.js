@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { showToast } from "../utils/ui/showToast";
 import { api } from "../api";
 
-const isDev = import.meta.env.DEV;
+const isDev = process.env.NODE_ENV !== "production";
 
 function OperatorLogin() {
   const location = useLocation();

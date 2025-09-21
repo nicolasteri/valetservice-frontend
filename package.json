@@ -20,7 +20,9 @@
     "react-scripts": "5.0.1",
     "react-toastify": "^11.0.5",
     "web-vitals": "^2.1.4",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "proxy": "https://api.italinks.com"
+
   },
   "scripts": {
     "start": "react-scripts start",
@@ -31,7 +33,6 @@
   "engines": {
     "node": ">=18 <22"
   },
-  
   "eslintConfig": {
     "extends": [
       "react-app",

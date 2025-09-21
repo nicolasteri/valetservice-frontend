@@ -2,8 +2,7 @@
 import axios from "axios";
 
 // CRA: le env si leggono da process.env.REACT_APP_*
-const API_BASE =
-  process.env.REACT_APP_API_BASE || "https://api.italinks.com/valet";
+const API_BASE = process.env.REACT_APP_API_BASE || "/valet"; // default per sviluppo locale
 
 export const api = axios.create({
   baseURL: API_BASE,
