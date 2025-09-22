@@ -29,6 +29,7 @@ function useDebounced(value, delay = 200) {
   }, [value, delay]);
   return v;
 }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function Dashboard() {
 
@@ -158,26 +159,24 @@ function Dashboard() {
     },
     [sortDir]
   );
-
-  // === Warm-up: aspetta che la sessione sia pronta (cookie vsid) ===
   const waitForSession = React.useCallback(async () => {
     let delay = 150;
     for (let i = 0; i < 8; i++) {
       try {
         const r = await api.get("me.php", { timeout: 3000 });
         if (r?.data?.success && r?.data?.ctx) {
-          return r.data.ctx; // { company_id, location_id, location_name, company_name, ... }
+          return r.data.ctx; // ctx valido
         }
       } catch (e) {
-        // 401 → non ancora pronta; altri errori → retry soft comunque
+        // 401 o altri errori: retry soft
       }
-      await new Promise((r) => setTimeout(r, delay));
+      // 👇 snapshot per NON catturare una var che cambia nel loop
+      const ms = delay;
+      await sleep(ms);
       delay = Math.min(Math.floor(delay * 1.5), 1200);
     }
-    return null; // sessione non pronta
+    return null;
   }, []);
-
-
 
   const refreshData = React.useCallback(async () => {
 
@@ -194,95 +193,42 @@ function Dashboard() {
     setIsDataLoading(true);
 
     try { 
-      // 1) Fetch paralleli principali (SENZA counters) — con cancellazione (signal)
-      const [resActive, resOver] = await Promise.all([
-        api.post(
-          "get_customers_secure.php",
-          { timeRange: "today", status: "ACTIVE_ONLY" },
-          { timeout: 10000, signal }
-        ),
-        api.post(
-          "get_customers_secure.php",
-          { timeRange: "overnight" },
-          { timeout: 10000, signal }
-        ),
-      ]);
+      // 1) Unica fetch: today (include anche OVERNIGHT)
+      const resAll = await api.post(
+        "get_customers_secure.php",
+        { timeRange: "today", status: "ALL", sortField, sortDir },
+        { timeout: 10000, signal }
+      );
 
-      // 2) Estrazione inline
-      const activeTodayRaw = Array.isArray(resActive?.data?.customers)
-        ? resActive.data.customers
-        : Array.isArray(resActive?.data?.data)
-        ? resActive.data.data
+      // 2) Estrai array e normalizza minimi
+      const rawAll = Array.isArray(resAll?.data?.customers)
+        ? resAll.data.customers
+        : Array.isArray(resAll?.data?.data)
+        ? resAll.data.data
         : [];
 
-      const overnightAll = Array.isArray(resOver?.data?.customers)
-        ? resOver.data.customers
-        : Array.isArray(resOver?.data?.data)
-        ? resOver.data.data
-        : [];
+      // assicurati che ci sia sempre tag_number (fallback a 'tag' se presente)
+      const all = rawAll.map((c) => ({
+        ...c,
+        tag_number: c?.tag_number ?? c?.tag ?? null,
+      }));
 
-      // 3) ATTIVI: fallback se ACTIVE_ONLY è vuoto → IN/PENDING/CARE
-      let activeToday = activeTodayRaw;
-      if (!Array.isArray(activeToday) || activeToday.length === 0) {
-        const [rIn, rPend, rCare] = await Promise.all([
-          api.post(
-            "get_customers_secure.php",
-            { timeRange: "today", status: "IN" },
-            { timeout: 10000, signal }
-          ),
-          api.post(
-            "get_customers_secure.php",
-            { timeRange: "today", status: "PENDING" },
-            { timeout: 10000, signal }
-          ),
-          api.post(
-            "get_customers_secure.php",
-            { timeRange: "today", status: "CARE" },
-            { timeout: 10000, signal }
-          ),
-        ]);
-
-        const getArr = (res) =>
-          Array.isArray(res?.data?.customers) ? res.data.customers :
-          Array.isArray(res?.data?.data)      ? res.data.data      : [];
-
-        activeToday = [...getArr(rIn), ...getArr(rPend), ...getArr(rCare)];
-
-        // dedup per sicurezza
-        const seen = new Set();
-        activeToday = activeToday.filter((c) => {
-          const k = c?.customer_id;
-          if (!k || seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
-      }
-
-      // 4) Normalizza overnight (status/tag)
-      const normalizedOvernights = Array.isArray(overnightAll)
-        ? overnightAll.map((c) => ({
-            ...c,
-            status: c?.status ?? "OVERNIGHT",
-            tag_number: c?.tag_number ?? c?.tag ?? null,
-          }))
-        : [];
+      // 3) Split lato client
+      const nextOvernights = all.filter((c) => c?.status === "OVERNIGHT");
+      const nextActive = all.filter(
+        (c) => c && (c.status === "IN" || c.status === "PENDING" || c.status === "CARE")
+      );
 
       // Se è partito un altro refresh nel frattempo, non scrivere
       if (mySeq !== refreshSeqRef.current) return;
 
       // 5) Scritture ATOMICHE delle liste (prima liste, poi counters)
-      const nextActive     = Array.isArray(activeToday)  ? activeToday  : (prevCustomersRef.current   ?? []);
-      const nextOvernights = normalizedOvernights.length > 0
-        ? normalizedOvernights
-        : (prevOvernightsRef.current ?? []);
-
       setCustomers(nextActive);
       setOvernights(nextOvernights);
 
       // 6) Deriva TAG ATTIVI dagli attivi (IN/PENDING/CARE)
-      const isNow = (s) => s === "IN" || s === "PENDING" || s === "CARE";
       const nextActiveTags = nextActive
-        .filter((c) => c && c.tag_number && isNow(c.status))
+        .filter((c) => c && c.tag_number)
         .map((c) => ({
           customer_id: c.customer_id,
           tag_number:  c.tag_number,
@@ -343,7 +289,7 @@ function Dashboard() {
         abortRef.current = null;
         setIsDataLoading(false);
       }
-    }, [applyCountersFromResponse]);
+    }, [applyCountersFromResponse, sortField, sortDir, waitForSession ]);
   
   React.useEffect(() => {
     let alive = true;

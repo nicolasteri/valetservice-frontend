@@ -159,12 +159,27 @@ function Dashboard() {
     [sortDir]
   );
 
-  const refreshData = React.useCallback(async () => {
-    // Guard su ID
-    if (!Number.isFinite(companyIdNum) || !Number.isFinite(locationIdNum)) {
-      console.warn("refreshData aborted: missing companyIdNum/locationIdNum");
-      return;
+  // === Warm-up: aspetta che la sessione sia pronta (cookie vsid) ===
+  const waitForSession = React.useCallback(async () => {
+    let delay = 150;
+    for (let i = 0; i < 8; i++) {
+      try {
+        const r = await api.get("me.php", { timeout: 3000 });
+        if (r?.data?.success && r?.data?.ctx) {
+          return r.data.ctx; // { company_id, location_id, location_name, company_name, ... }
+        }
+      } catch (e) {
+        // 401 → non ancora pronta; altri errori → retry soft comunque
+      }
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(Math.floor(delay * 1.5), 1200);
     }
+    return null; // sessione non pronta
+  }, []);
+
+
+
+  const refreshData = React.useCallback(async () => {
 
     // Sequencer anti-race: solo l’ultimo refresh può scrivere
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
@@ -178,26 +193,17 @@ function Dashboard() {
 
     setIsDataLoading(true);
 
-    try {
-      // 0) Soft update OVERNIGHT (se fallisce, non blocca; niente signal)
-      try {
-        await axios.post(
-          "https://api.italinks.com/valet/update_overnight.php",
-          { company_id: companyIdNum, location_id: locationIdNum },
-          { timeout: 10000 }
-        );
-      } catch (_) {}
-
+    try { 
       // 1) Fetch paralleli principali (SENZA counters) — con cancellazione (signal)
       const [resActive, resOver] = await Promise.all([
-        axios.post(
-          "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
+        api.post(
+          "get_customers_secure.php",
+          { timeRange: "today", status: "ACTIVE_ONLY" },
           { timeout: 10000, signal }
         ),
-        axios.post(
-          "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "overnight" },
+        api.post(
+          "get_customers_secure.php",
+          { timeRange: "overnight" },
           { timeout: 10000, signal }
         ),
       ]);
@@ -219,19 +225,19 @@ function Dashboard() {
       let activeToday = activeTodayRaw;
       if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "IN" },
             { timeout: 10000, signal }
           ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "PENDING" },
             { timeout: 10000, signal }
           ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "CARE" },
             { timeout: 10000, signal }
           ),
         ]);
@@ -290,50 +296,83 @@ function Dashboard() {
       // 7) Counters: fetch SEPARATA e tollerante (NO signal: non la abortiamo)
       let resCounters = null;
       try {
-        resCounters = await axios.post(
-          "https://api.italinks.com/valet/get_counters.php",
-          { company_id: companyIdNum, location_id: locationIdNum },
-          { timeout: 10000 }
-        ).catch(() => null);
+        resCounters = await api
+          .get("get_counters_secure.php", { timeout: 10000 })
+          .catch(() => null);
       } catch (err) {
         if (DEBUG) console.warn("[counters] fetch failed:", err?.message || err);
       }
 
       if (mySeq !== refreshSeqRef.current) return;
-
       // aggiorna i contatori SOLO se payload valido (mai azzerare)
-      const ok = applyCountersFromResponse(resCounters);
+      applyCountersFromResponse(resCounters);
       if (resCounters?.data?.day_window) {
         setDayWindow(resCounters.data.day_window); // { start: "YYYY-MM-DD HH:mm:ss", end: "..." }
       }
 
-    } catch (e) {
-      // Ignora i refresh abortiti da un nuovo giro (è voluto)
-      const isCanceled =
-        e?.code === "ERR_CANCELED" ||               // Axios >= v1
-        (typeof axios !== "undefined" && axios.isCancel?.(e)); // fallback
+      } catch (e) {
+        const isCanceled =
+          e?.code === "ERR_CANCELED" ||
+          (typeof axios !== "undefined" && axios.isCancel?.(e));
 
-      if (isCanceled) {
-        // opzionale: log silenzioso in debug
-        if (typeof DEBUG !== "undefined" && DEBUG) {
-          console.log("refreshData aborted by a newer request");
+        if (isCanceled) {
+          // silenzioso: è normale quando parte un nuovo refresh
+          if (typeof DEBUG !== "undefined" && DEBUG) {
+            console.log("refreshData aborted by a newer request");
+          }
+        } else if (e?.response?.status === 401) {
+          // Sessione non ancora pronta → warm-up e retry UNA volta, soft
+          if (typeof DEBUG !== "undefined" && DEBUG) {
+            console.warn("[refresh] got 401 → warming session and retrying once…");
+          }
+          try {
+            const ok = await waitForSession();
+            if (ok) {
+              // piccolo delay per sicurezza
+              setTimeout(() => {
+                // non aspettare il risultato qui per non bloccare la UI
+                refreshData();
+              }, 200);
+            }
+          } catch { /* no-op */ }
+        } else {
+          console.error("refreshData error:", e);
+          showToast?.error?.("Refresh failed");
         }
-      } else {
-        console.error("refreshData error:", e);
-        showToast?.error?.("Refresh failed");
+      } finally {
+        abortRef.current = null;
+        setIsDataLoading(false);
       }
-    } finally {
-      // cleanup AbortController di questo giro
-      abortRef.current = null;
-      setIsDataLoading(false);
-    }
-  }, [companyIdNum, locationIdNum, applyCountersFromResponse]);
+    }, [applyCountersFromResponse]);
+  
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      const ctx = await waitForSession();       // <-- ora ritorna il contesto
+      if (!alive) return;
 
-  useEffect(() => {
-    if (DEBUG) console.log("[RD] start");
-    refreshData();
-  }, [refreshData]);
-  // fine debug
+      if (!ctx) {
+        // niente toast in loop; uno solo qui è ok
+        showToast.error("Access denied. Please login.");
+        navigate("/company-login");
+        return;
+      }
+
+      // ▶️ Allinea lo state dagli header di sessione
+      setCompanyId(Number(ctx.company_id) || 0);
+      setLocationId(Number(ctx.location_id) || 0);
+      if (ctx.location_name) setLocationName(ctx.location_name);
+
+      // (facoltativo) se l’header UI legge ancora dai nomi su localStorage, puoi salvare SOLO i nomi:
+      // localStorage.setItem("company_name", ctx.company_name || "");
+      // localStorage.setItem("location_name", ctx.location_name || "");
+
+      // poi primo fetch reale
+      await refreshData();
+    })();
+    return () => { alive = false; };
+  }, [waitForSession, refreshData, navigate]);
+
 
   const refreshDebounceRef = React.useRef(null);
   const refreshSoon = React.useCallback((delay = 300) => {
@@ -457,14 +496,8 @@ function Dashboard() {
   const hasMountedRef = React.useRef(false); // per saltare la prima esecuzione del useEffect dei filtri
 
   const fetchCustomers = useCallback(async () => {
-    if (!companyIdNum || !locationIdNum) {
-      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
-      return;
-    }
-
+    // ⚠️ niente più guard su company/location: vivi in sessione
     const payload = {
-      location_id: locationIdNum,
-      company_id:  companyIdNum,
       ...(filterStatus !== "ALL" && { status: filterStatus }),
       search:    searchQuery,
       timeRange: "today",
@@ -473,15 +506,11 @@ function Dashboard() {
     };
 
     try {
-      const res = await fetch("get_customers.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      // ⬅️ usa il client con cookie e l’endpoint secure (senza ID nel body)
+      const res  = await api.post("/get_customers_secure.php", payload);
+      setDbConnected(res?.status === 200 && res?.data?.success !== false);
 
-      setDbConnected(res.ok);
-
-      const data = await res.json();
+      const data = res.data;
       const customersList = Array.isArray(data?.customers) ? data.customers
                           : Array.isArray(data?.data)      ? data.data
                           : [];
@@ -513,14 +542,14 @@ function Dashboard() {
       console.error("🔥 Fetch error:", err);
       setDbConnected(false);
     }
-  }, [companyIdNum, locationIdNum, filterStatus, searchQuery, sortField, sortDir]);
+  }, [filterStatus, searchQuery, sortField, sortDir]); // ⬅️ deps: via company/location
 
   // useEffect /////////////////////////
   useEffect(() => {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
     return () => clearInterval(id);
   }, []);
-
+  /*/ DEBUG DA RIMUOVERE 
   useEffect(() => {
     const companyIdRaw = localStorage.getItem("company_id");
     const locationIdRaw = localStorage.getItem("location_id");
@@ -537,14 +566,14 @@ function Dashboard() {
       showToast.error("Access denied. Please login.");
       navigate("/company-login");
       return;
-    }
+    } 
 
     // ✅ Set all at once
     setCompanyId(parsedCompanyId);
     setLocationId(parsedLocationId);
     if (storedLocationName) setLocationName(storedLocationName);
 
-  }, [navigate]);
+  }, [navigate]);*/
 
   useEffect(() => {
     // Salta la primissima esecuzione (al mount ci pensa refreshData)
@@ -585,7 +614,7 @@ function Dashboard() {
 
   const checkPhoneNumber = async (phone) => {
     try {
-      const response = await axios.post("https://api.italinks.com/valet/check_phone.php", {
+      const response = await api.post("check_phone.php", {
         phone_number: phone,
         company_id: companyIdNum,
       });
@@ -638,8 +667,8 @@ function Dashboard() {
       const location_id = locationIdNum;
 
       // 🔍 Check se il cliente esiste già per questa company
-      const responseCheck = await axios.post(
-        "https://api.italinks.com/valet/check_phone.php",
+      const responseCheck = await api.post(
+        "check_phone.php",
         {
           phone_number: customerData.phone_number,
           company_id,
@@ -650,8 +679,8 @@ function Dashboard() {
         // ✅ Cliente già registrato: crea record odierno e aggiorna tag
         const customer_id = responseCheck.data.customer.customer_id;
 
-        const responseAdd = await axios.post(
-          "https://api.italinks.com/valet/add_existing_customer.php",
+        const responseAdd = await api.post(
+          "add_existing_customer.php",
           {
             customer_id,
             tag_number: parseInt(customerData.tag_number, 10),
@@ -699,16 +728,7 @@ function Dashboard() {
           location_id,
         };
 
-        const responseNew = await fetch(
-          "https://api.italinks.com/valet/add_customers.php",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          }
-        );
-
-        const dataNew = await responseNew.json();
+        const { data: dataNew } = await api.post("add_customers.php", payload);
 
         if (dataNew.success) {
           const created =
@@ -755,23 +775,25 @@ function Dashboard() {
 
     setCheckingTag(true);
 
-    try {
-      const response = await fetch("https://api.italinks.com/valet/check_tag.php", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          tag_number: parseInt(customerData.tag_number),
-          location_id: locationIdNum,
-          company_id: companyIdNum,
-        }),
+   try {
+      // guard: tag valido
+      const tag = Number(customerData.tag_number);
+      if (!Number.isFinite(tag)) {
+        console.warn("check_tag: invalid tag_number");
+        setTagStatus(null);
+        setCheckingTag(false);
+        return;
+      }
+
+      // usa il client con cookie + baseURL
+      const { data } = await api.post("check_tag.php", {
+        tag_number: tag,
+        location_id: locationIdNum, // ok per ora
+        company_id: companyIdNum,   // ok per ora
       });
 
-      const data = await response.json();
-
-      if (!data.success) {
-        console.error("Errore nel controllo tag:", data.error || "Errore sconosciuto");
+      if (!data?.success) {
+        console.error("Errore nel controllo tag:", data?.error || "Errore sconosciuto");
         setTagStatus(null);
       } else {
         setTagStatus(data.available ? "available" : "unavailable");
@@ -780,7 +802,6 @@ function Dashboard() {
       console.error("Tag check failed", error);
       setTagStatus(null);
     }
-
     setCheckingTag(false);
   };
 
@@ -793,8 +814,8 @@ function Dashboard() {
     }
 
     try {
-      const response = await axios.post(
-        "https://api.italinks.com/valet/add_existing_customer.php",
+      const response = await api.post(
+        "add_existing_customer.php",
         {
           customer_id: existingCustomer.customer_id,
           tag_number: parseInt(customerData.tag_number, 10),
@@ -987,19 +1008,13 @@ function Dashboard() {
     }
     try {
       // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
-      const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customer_id,
-          status,
-          company_id: companyIdNum,
-          location_id: locationIdNum,
-          tag_number,
-        }),
+      const { data } = await api.post("update_customer_status.php", {
+        customer_id,
+        status,
+        company_id: companyIdNum,   // (ok per ora; quando avremo la versione _secure li toglieremo)
+        location_id: locationIdNum,
+        tag_number,
       });
-
-      const data = await res.json();
 
       if (data.success) {
         // ✅ 3) Allinea lo stato locale per tutti i casi (PENDING, CARE, IN inclusi)
