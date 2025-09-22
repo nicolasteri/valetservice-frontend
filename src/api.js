@@ -1,12 +1,12 @@
-// src/api.js
 import axios from "axios";
 
-// CRA: le env si leggono da process.env.REACT_APP_*
-const API_BASE = process.env.REACT_APP_API_BASE || "/valet"; // default per sviluppo locale
+const RAW_BASE = process.env.REACT_APP_API_BASE || "/valet";
+// Normalizza con "/" finale per sicurezza
+const API_BASE = RAW_BASE.endsWith("/") ? RAW_BASE : RAW_BASE + "/";
 
 export const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true, // invia/legge il cookie HttpOnly "vsid"
+  withCredentials: true,
   headers: { "Content-Type": "application/json" },
 });
 

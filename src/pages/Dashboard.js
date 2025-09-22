@@ -12,6 +12,7 @@ import { useNavigate } from "react-router-dom";
 import { useCountersAirbag } from "../utils/dashboard_airbags";
 import TinySpinner from "../components/TinySpinner";
 import { DEBUG } from "../utils/debug";
+import { api } from "../api.js";
 
 export const statusPriority = { PENDING: 0, CARE: 1, IN: 2, OVERNIGHT: 3, OUT: 4 };   // più basso = più importante
 
@@ -159,11 +160,6 @@ function Dashboard() {
   );
 
   const refreshData = React.useCallback(async () => {
-    // Guard su ID
-    if (!Number.isFinite(companyIdNum) || !Number.isFinite(locationIdNum)) {
-      console.warn("refreshData aborted: missing companyIdNum/locationIdNum");
-      return;
-    }
 
     // Sequencer anti-race: solo l’ultimo refresh può scrivere
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
@@ -177,26 +173,17 @@ function Dashboard() {
 
     setIsDataLoading(true);
 
-    try {
-      // 0) Soft update OVERNIGHT (se fallisce, non blocca; niente signal)
-      try {
-        await axios.post(
-          "https://api.italinks.com/valet/update_overnight.php",
-          { company_id: companyIdNum, location_id: locationIdNum },
-          { timeout: 10000 }
-        );
-      } catch (_) {}
-
+    try { 
       // 1) Fetch paralleli principali (SENZA counters) — con cancellazione (signal)
       const [resActive, resOver] = await Promise.all([
-        axios.post(
-          "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "ACTIVE_ONLY" },
+        api.post(
+          "get_customers_secure.php",
+          { timeRange: "today", status: "ACTIVE_ONLY" },
           { timeout: 10000, signal }
         ),
-        axios.post(
-          "https://api.italinks.com/valet/get_customers.php",
-          { company_id: companyIdNum, location_id: locationIdNum, timeRange: "overnight" },
+        api.post(
+          "get_customers_secure.php",
+          { timeRange: "overnight" },
           { timeout: 10000, signal }
         ),
       ]);
@@ -218,19 +205,19 @@ function Dashboard() {
       let activeToday = activeTodayRaw;
       if (!Array.isArray(activeToday) || activeToday.length === 0) {
         const [rIn, rPend, rCare] = await Promise.all([
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "IN" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "IN" },
             { timeout: 10000, signal }
           ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "PENDING" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "PENDING" },
             { timeout: 10000, signal }
           ),
-          axios.post(
-            "https://api.italinks.com/valet/get_customers.php",
-            { company_id: companyIdNum, location_id: locationIdNum, timeRange: "today", status: "CARE" },
+          api.post(
+            "get_customers_secure.php",
+            { timeRange: "today", status: "CARE" },
             { timeout: 10000, signal }
           ),
         ]);
@@ -289,19 +276,16 @@ function Dashboard() {
       // 7) Counters: fetch SEPARATA e tollerante (NO signal: non la abortiamo)
       let resCounters = null;
       try {
-        resCounters = await axios.post(
-          "https://api.italinks.com/valet/get_counters.php",
-          { company_id: companyIdNum, location_id: locationIdNum },
-          { timeout: 10000 }
-        ).catch(() => null);
+        resCounters = await api
+          .get("get_counters_secure.php", { timeout: 10000 })
+          .catch(() => null);
       } catch (err) {
         if (DEBUG) console.warn("[counters] fetch failed:", err?.message || err);
       }
 
       if (mySeq !== refreshSeqRef.current) return;
-
       // aggiorna i contatori SOLO se payload valido (mai azzerare)
-      const ok = applyCountersFromResponse(resCounters);
+      applyCountersFromResponse(resCounters);
       if (resCounters?.data?.day_window) {
         setDayWindow(resCounters.data.day_window); // { start: "YYYY-MM-DD HH:mm:ss", end: "..." }
       }
@@ -326,7 +310,8 @@ function Dashboard() {
       abortRef.current = null;
       setIsDataLoading(false);
     }
-  }, [companyIdNum, locationIdNum, applyCountersFromResponse]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyCountersFromResponse]);
 
   useEffect(() => {
     if (DEBUG) console.log("[RD] start");
@@ -456,14 +441,8 @@ function Dashboard() {
   const hasMountedRef = React.useRef(false); // per saltare la prima esecuzione del useEffect dei filtri
 
   const fetchCustomers = useCallback(async () => {
-    if (!companyIdNum || !locationIdNum) {
-      console.warn("⚠️ fetchCustomers aborted: missing locationId or companyId");
-      return;
-    }
-
+    // ⚠️ niente più guard su company/location: vivi in sessione
     const payload = {
-      location_id: locationIdNum,
-      company_id:  companyIdNum,
       ...(filterStatus !== "ALL" && { status: filterStatus }),
       search:    searchQuery,
       timeRange: "today",
@@ -472,15 +451,11 @@ function Dashboard() {
     };
 
     try {
-      const res = await fetch("get_customers.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      // ⬅️ usa il client con cookie e l’endpoint secure (senza ID nel body)
+      const res  = await api.post("/get_customers_secure.php", payload);
+      setDbConnected(res?.status === 200 && res?.data?.success !== false);
 
-      setDbConnected(res.ok);
-
-      const data = await res.json();
+      const data = res.data;
       const customersList = Array.isArray(data?.customers) ? data.customers
                           : Array.isArray(data?.data)      ? data.data
                           : [];
@@ -512,7 +487,7 @@ function Dashboard() {
       console.error("🔥 Fetch error:", err);
       setDbConnected(false);
     }
-  }, [companyIdNum, locationIdNum, filterStatus, searchQuery, sortField, sortDir]);
+  }, [filterStatus, searchQuery, sortField, sortDir]); // ⬅️ deps: via company/location
 
   // useEffect /////////////////////////
   useEffect(() => {
@@ -584,7 +559,7 @@ function Dashboard() {
 
   const checkPhoneNumber = async (phone) => {
     try {
-      const response = await axios.post("https://api.italinks.com/valet/check_phone.php", {
+      const response = await api.post("check_phone.php", {
         phone_number: phone,
         company_id: companyIdNum,
       });
@@ -637,8 +612,8 @@ function Dashboard() {
       const location_id = locationIdNum;
 
       // 🔍 Check se il cliente esiste già per questa company
-      const responseCheck = await axios.post(
-        "https://api.italinks.com/valet/check_phone.php",
+      const responseCheck = await api.post(
+        "check_phone.php",
         {
           phone_number: customerData.phone_number,
           company_id,
@@ -649,8 +624,8 @@ function Dashboard() {
         // ✅ Cliente già registrato: crea record odierno e aggiorna tag
         const customer_id = responseCheck.data.customer.customer_id;
 
-        const responseAdd = await axios.post(
-          "https://api.italinks.com/valet/add_existing_customer.php",
+        const responseAdd = await api.post(
+          "add_existing_customer.php",
           {
             customer_id,
             tag_number: parseInt(customerData.tag_number, 10),
@@ -698,16 +673,7 @@ function Dashboard() {
           location_id,
         };
 
-        const responseNew = await fetch(
-          "https://api.italinks.com/valet/add_customers.php",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          }
-        );
-
-        const dataNew = await responseNew.json();
+        const { data: dataNew } = await api.post("add_customers.php", payload);
 
         if (dataNew.success) {
           const created =
@@ -754,23 +720,25 @@ function Dashboard() {
 
     setCheckingTag(true);
 
-    try {
-      const response = await fetch("https://api.italinks.com/valet/check_tag.php", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          tag_number: parseInt(customerData.tag_number),
-          location_id: locationIdNum,
-          company_id: companyIdNum,
-        }),
+   try {
+      // guard: tag valido
+      const tag = Number(customerData.tag_number);
+      if (!Number.isFinite(tag)) {
+        console.warn("check_tag: invalid tag_number");
+        setTagStatus(null);
+        setCheckingTag(false);
+        return;
+      }
+
+      // usa il client con cookie + baseURL
+      const { data } = await api.post("check_tag.php", {
+        tag_number: tag,
+        location_id: locationIdNum, // ok per ora
+        company_id: companyIdNum,   // ok per ora
       });
 
-      const data = await response.json();
-
-      if (!data.success) {
-        console.error("Errore nel controllo tag:", data.error || "Errore sconosciuto");
+      if (!data?.success) {
+        console.error("Errore nel controllo tag:", data?.error || "Errore sconosciuto");
         setTagStatus(null);
       } else {
         setTagStatus(data.available ? "available" : "unavailable");
@@ -779,7 +747,6 @@ function Dashboard() {
       console.error("Tag check failed", error);
       setTagStatus(null);
     }
-
     setCheckingTag(false);
   };
 
@@ -792,8 +759,8 @@ function Dashboard() {
     }
 
     try {
-      const response = await axios.post(
-        "https://api.italinks.com/valet/add_existing_customer.php",
+      const response = await api.post(
+        "add_existing_customer.php",
         {
           customer_id: existingCustomer.customer_id,
           tag_number: parseInt(customerData.tag_number, 10),
@@ -986,19 +953,13 @@ function Dashboard() {
     }
     try {
       // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
-      const res = await fetch("https://api.italinks.com/valet/update_customer_status.php", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customer_id,
-          status,
-          company_id: companyIdNum,
-          location_id: locationIdNum,
-          tag_number,
-        }),
+      const { data } = await api.post("update_customer_status.php", {
+        customer_id,
+        status,
+        company_id: companyIdNum,   // (ok per ora; quando avremo la versione _secure li toglieremo)
+        location_id: locationIdNum,
+        tag_number,
       });
-
-      const data = await res.json();
 
       if (data.success) {
         // ✅ 3) Allinea lo stato locale per tutti i casi (PENDING, CARE, IN inclusi)

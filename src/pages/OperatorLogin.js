@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { showToast } from "../utils/ui/showToast";
-import { api } from "../api";
+import { api } from "../api.js";
 
 const isDev = process.env.NODE_ENV !== "production";
 
