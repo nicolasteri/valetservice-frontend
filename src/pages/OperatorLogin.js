@@ -37,7 +37,7 @@ function OperatorLogin() {
     }
 
     try {
-      const { data } = await api.post("/operator_login.php", {
+      const { data } = await api.post("operator_login.php", {
         location_code: cleanLocationCode,
         company_code: cleanCompanyCode,
       });
@@ -45,20 +45,7 @@ function OperatorLogin() {
       if (isDev) console.log("API response:", data);
 
       if (data?.success) {
-        // ✅ Sessione è nel cookie HttpOnly: NON salviamo IDs nel localStorage.
-        // Se la tua UI header usa i nomi da localStorage, puoi (temporaneamente) salvarne SOLO i nomi:
-        // localStorage.setItem("company_name", data.company_name);
-        // localStorage.setItem("location_name", data.location_name);
-
-        // (facoltativo) valida la sessione e/o carica contesto
-        try {
-          await api.get("/me.php");
-        } catch {
-          // se fallisce, non bloccare il redirect: la sessione è già attiva
-        }
-
         showToast.success(`Welcome to ${data.location_name}`);
-
         setTimeout(() => {
           if (isDev) console.log("🚀 Redirecting to dashboard...");
           navigate("/dashboard");
