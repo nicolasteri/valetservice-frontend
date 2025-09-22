@@ -161,28 +161,22 @@ function Dashboard() {
 
   // === Warm-up: aspetta che la sessione sia pronta (cookie vsid) ===
   const waitForSession = React.useCallback(async () => {
-    // fino a 8 tentativi con backoff: 150ms → max 1200ms
     let delay = 150;
     for (let i = 0; i < 8; i++) {
       try {
-        const res = await api.get("me.php", { timeout: 3000 });
-        if (res?.data?.success) return true;  // sessione ok
-      } catch (e) {
-        const s = e?.response?.status;
-        // 401 = non ancora pronta: ritenta dopo un pochino
-        if (s === 401) {
-          await new Promise(r => setTimeout(r, delay));
-          delay = Math.min(Math.floor(delay * 1.5), 1200);
-          continue;
+        const r = await api.get("me.php", { timeout: 3000 });
+        if (r?.data?.success && r?.data?.ctx) {
+          return r.data.ctx; // { company_id, location_id, location_name, company_name, ... }
         }
-        // altri errori: ritenta comunque una volta, poi esci
-        await new Promise(r => setTimeout(r, delay));
-        delay = Math.min(Math.floor(delay * 1.5), 1200);
-        continue;
+      } catch (e) {
+        // 401 → non ancora pronta; altri errori → retry soft comunque
       }
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(Math.floor(delay * 1.5), 1200);
     }
-    return false;
+    return null; // sessione non pronta
   }, []);
+
 
 
   const refreshData = React.useCallback(async () => {
@@ -357,15 +351,34 @@ function Dashboard() {
     refreshData();
   }, [refreshData]);
   */ 
-   React.useEffect(() => {
+  React.useEffect(() => {
     let alive = true;
     (async () => {
-      await waitForSession();     // aspetta la sessione (vsid) prima del primo fetch
+      const ctx = await waitForSession();       // <-- ora ritorna il contesto
       if (!alive) return;
-      await refreshData();        // poi fai il primo refresh vero
+
+      if (!ctx) {
+        // niente toast in loop; uno solo qui è ok
+        showToast.error("Access denied. Please login.");
+        navigate("/company-login");
+        return;
+      }
+
+      // ▶️ Allinea lo state dagli header di sessione
+      setCompanyId(Number(ctx.company_id) || 0);
+      setLocationId(Number(ctx.location_id) || 0);
+      if (ctx.location_name) setLocationName(ctx.location_name);
+
+      // (facoltativo) se l’header UI legge ancora dai nomi su localStorage, puoi salvare SOLO i nomi:
+      // localStorage.setItem("company_name", ctx.company_name || "");
+      // localStorage.setItem("location_name", ctx.location_name || "");
+
+      // poi primo fetch reale
+      await refreshData();
     })();
     return () => { alive = false; };
-  }, [waitForSession, refreshData]);
+  }, [waitForSession, refreshData, navigate]);
+
 
   const refreshDebounceRef = React.useRef(null);
   const refreshSoon = React.useCallback((delay = 300) => {
@@ -542,7 +555,7 @@ function Dashboard() {
     const id = setInterval(() => setCurrentTime(Date.now()), 1000); // ogni 1s
     return () => clearInterval(id);
   }, []);
-
+  /*/ DEBUG DA RIMUOVERE 
   useEffect(() => {
     const companyIdRaw = localStorage.getItem("company_id");
     const locationIdRaw = localStorage.getItem("location_id");
@@ -559,14 +572,14 @@ function Dashboard() {
       showToast.error("Access denied. Please login.");
       navigate("/company-login");
       return;
-    }
+    } 
 
     // ✅ Set all at once
     setCompanyId(parsedCompanyId);
     setLocationId(parsedLocationId);
     if (storedLocationName) setLocationName(storedLocationName);
 
-  }, [navigate]);
+  }, [navigate]);*/
 
   useEffect(() => {
     // Salta la primissima esecuzione (al mount ci pensa refreshData)
