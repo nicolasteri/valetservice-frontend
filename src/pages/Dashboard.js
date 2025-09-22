@@ -344,13 +344,7 @@ function Dashboard() {
         setIsDataLoading(false);
       }
     }, [applyCountersFromResponse]);
-
-  /*   FORSE DA ELIMINARE; CONTROLLO USEFFECT WAITFORSESSION FIRST
-  useEffect(() => {
-    if (DEBUG) console.log("[RD] start");
-    refreshData();
-  }, [refreshData]);
-  */ 
+  
   React.useEffect(() => {
     let alive = true;
     (async () => {
