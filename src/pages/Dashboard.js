@@ -159,6 +159,32 @@ function Dashboard() {
     [sortDir]
   );
 
+  // === Warm-up: aspetta che la sessione sia pronta (cookie vsid) ===
+  const waitForSession = React.useCallback(async () => {
+    // fino a 8 tentativi con backoff: 150ms → max 1200ms
+    let delay = 150;
+    for (let i = 0; i < 8; i++) {
+      try {
+        const res = await api.get("me.php", { timeout: 3000 });
+        if (res?.data?.success) return true;  // sessione ok
+      } catch (e) {
+        const s = e?.response?.status;
+        // 401 = non ancora pronta: ritenta dopo un pochino
+        if (s === 401) {
+          await new Promise(r => setTimeout(r, delay));
+          delay = Math.min(Math.floor(delay * 1.5), 1200);
+          continue;
+        }
+        // altri errori: ritenta comunque una volta, poi esci
+        await new Promise(r => setTimeout(r, delay));
+        delay = Math.min(Math.floor(delay * 1.5), 1200);
+        continue;
+      }
+    }
+    return false;
+  }, []);
+
+
   const refreshData = React.useCallback(async () => {
 
     // Sequencer anti-race: solo l’ultimo refresh può scrivere
@@ -290,34 +316,56 @@ function Dashboard() {
         setDayWindow(resCounters.data.day_window); // { start: "YYYY-MM-DD HH:mm:ss", end: "..." }
       }
 
-    } catch (e) {
-      // Ignora i refresh abortiti da un nuovo giro (è voluto)
-      const isCanceled =
-        e?.code === "ERR_CANCELED" ||               // Axios >= v1
-        (typeof axios !== "undefined" && axios.isCancel?.(e)); // fallback
+      } catch (e) {
+        const isCanceled =
+          e?.code === "ERR_CANCELED" ||
+          (typeof axios !== "undefined" && axios.isCancel?.(e));
 
-      if (isCanceled) {
-        // opzionale: log silenzioso in debug
-        if (typeof DEBUG !== "undefined" && DEBUG) {
-          console.log("refreshData aborted by a newer request");
+        if (isCanceled) {
+          // silenzioso: è normale quando parte un nuovo refresh
+          if (typeof DEBUG !== "undefined" && DEBUG) {
+            console.log("refreshData aborted by a newer request");
+          }
+        } else if (e?.response?.status === 401) {
+          // Sessione non ancora pronta → warm-up e retry UNA volta, soft
+          if (typeof DEBUG !== "undefined" && DEBUG) {
+            console.warn("[refresh] got 401 → warming session and retrying once…");
+          }
+          try {
+            const ok = await waitForSession();
+            if (ok) {
+              // piccolo delay per sicurezza
+              setTimeout(() => {
+                // non aspettare il risultato qui per non bloccare la UI
+                refreshData();
+              }, 200);
+            }
+          } catch { /* no-op */ }
+        } else {
+          console.error("refreshData error:", e);
+          showToast?.error?.("Refresh failed");
         }
-      } else {
-        console.error("refreshData error:", e);
-        showToast?.error?.("Refresh failed");
+      } finally {
+        abortRef.current = null;
+        setIsDataLoading(false);
       }
-    } finally {
-      // cleanup AbortController di questo giro
-      abortRef.current = null;
-      setIsDataLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [applyCountersFromResponse]);
+    }, [applyCountersFromResponse]);
 
+  /*   FORSE DA ELIMINARE; CONTROLLO USEFFECT WAITFORSESSION FIRST
   useEffect(() => {
     if (DEBUG) console.log("[RD] start");
     refreshData();
   }, [refreshData]);
-  // fine debug
+  */ 
+   React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      await waitForSession();     // aspetta la sessione (vsid) prima del primo fetch
+      if (!alive) return;
+      await refreshData();        // poi fai il primo refresh vero
+    })();
+    return () => { alive = false; };
+  }, [waitForSession, refreshData]);
 
   const refreshDebounceRef = React.useRef(null);
   const refreshSoon = React.useCallback((delay = 300) => {

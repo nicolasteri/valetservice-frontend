@@ -24,3 +24,16 @@ if (process.env.NODE_ENV !== "production") {
     }
   );
 }
+
+api.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (process.env.NODE_ENV !== "production") {
+      const s = err?.response?.status;
+      const url = err?.config?.url;
+      // mostriamo il body solo in dev
+      console.warn("[API ERR]", s, url, err?.response?.data);
+    }
+    return Promise.reject(err);
+  }
+);
