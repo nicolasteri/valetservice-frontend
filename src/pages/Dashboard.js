@@ -101,6 +101,8 @@ function Dashboard() {
   React.useEffect(() => { prevOvernightsRef.current = overnights; }, [overnights]);
 
   const abortRef = React.useRef(null);
+  const isRefreshingRef   = React.useRef(false);
+  const queuedReasonRef   = React.useRef(null);
 
   // Subito dopo aver letto da localStorage:
 
@@ -178,15 +180,22 @@ function Dashboard() {
     return null;
   }, []);
 
-  const refreshData = React.useCallback(async () => {
+  const refreshData = React.useCallback(async (reason = "manual") => {
+    // Single-flight: se un refresh è in corso, metti in coda
+    if (isRefreshingRef.current) {
+      queuedReasonRef.current = reason;
+      if (DEBUG) console.log(`[RD] queued (${reason})`);
+      return;
+    }
+    isRefreshingRef.current = true;
 
     // Sequencer anti-race: solo l’ultimo refresh può scrivere
     const mySeq = (refreshSeqRef.current = (refreshSeqRef.current || 0) + 1);
 
-    // Cancella eventuali fetch in corso e prepara un nuovo AbortController
+    /*/ Cancella eventuali fetch in corso e prepara un nuovo AbortController
     if (abortRef.current) {
       try { abortRef.current.abort(); } catch {}
-    }
+    }*/
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
@@ -288,9 +297,18 @@ function Dashboard() {
       } finally {
         abortRef.current = null;
         setIsDataLoading(false);
+        isRefreshingRef.current = false;
+
+        // se c’è un refresh in coda, drenalo subito
+        const queued = queuedReasonRef.current;
+        queuedReasonRef.current = null;
+        if (queued) {
+          if (DEBUG) console.log(`[RD] draining queued → ${queued}`);
+          setTimeout(() => refreshData(queued), 50); // piccolo delay per lasciare dipingere
+        }
       }
-    }, [applyCountersFromResponse, sortField, sortDir, waitForSession ]);
-  
+    }, [applyCountersFromResponse, sortField, sortDir, waitForSession]);  
+
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -314,17 +332,17 @@ function Dashboard() {
       // localStorage.setItem("location_name", ctx.location_name || "");
 
       // poi primo fetch reale
-      await refreshData();
+      await refreshData("mount");
     })();
     return () => { alive = false; };
   }, [waitForSession, refreshData, navigate]);
 
 
   const refreshDebounceRef = React.useRef(null);
-  const refreshSoon = React.useCallback((delay = 300) => {
+  const refreshSoon = React.useCallback((delay = 300, reason = "refreshSoon") => {
     if (refreshDebounceRef.current) clearTimeout(refreshDebounceRef.current);
     refreshDebounceRef.current = setTimeout(() => {
-      refreshData();
+      refreshData(reason);
     }, delay);
   }, [refreshData]);
 
@@ -899,17 +917,20 @@ function Dashboard() {
     // trova il record in customers OPPURE in overnights
     const current = getRecordById(customer_id);
 
-    // tag_number necessario per l'API: passa quello dal caller, oppure quello nel record, oppure quello del selected
-    const tag_number = opts.tag_number ?? current?.tag_number ?? selectedCustomer?.tag_number ?? null;
+    // tag_number necessario per l'API
+    const tag_number =
+      opts.tag_number ??
+      current?.tag_number ??
+      selectedCustomer?.tag_number ??
+      null;
+
     if (!tag_number) {
-      // possiamo comunque tentare, ma avvisa che manca il tag (dipende dalle esigenze del backend)
       console.warn("updateStatus: missing tag_number, proceeding anyway");
     }
-  
 
-    // ⚡️ 1) UPDATE OTTIMISTICO per OVERNIGHT e OUT (UI subito reattiva)
+    // ⚡️ 1) UPDATE OTTIMISTICO (UI subito reattiva)
     if (status === "OVERNIGHT") {
-      // toglilo dalle liste del giorno (i tuoi filtri escludono OVERNIGHT) e mettilo subito tra gli overnights
+      // sposta in OVERNIGHT subito
       setCustomers((prev) =>
         customSort(
           prev.map((c) =>
@@ -921,14 +942,20 @@ function Dashboard() {
       );
       setOvernights((prev) => {
         const base = current ?? { customer_id, tag_number };
-        const updated = { ...base, status: "OVERNIGHT", touchedAt: Date.now() };        const exists = prev.some((c) => c.customer_id === customer_id);
+        const updated = { ...base, status: "OVERNIGHT", touchedAt: Date.now() };
+        const exists = prev.some((c) => c.customer_id === customer_id);
         return exists
           ? prev.map((c) => (c.customer_id === customer_id ? updated : c))
           : [updated, ...prev];
       });
-      bumpCountersOptimistic(current?.status ?? "IN", "OVERNIGHT", isInTodayList(customer_id));
+      bumpCountersOptimistic(
+        current?.status ?? "IN",
+        "OVERNIGHT",
+        isInTodayList(customer_id)
+      );
+
     } else if (status === "OUT") {
-      // segna OUT subito e rimuovilo dagli overnights se c’era
+      // marca OUT e toglilo da overnights se c'era
       setCustomers((prev) =>
         customSort(
           prev.map((c) => {
@@ -937,45 +964,55 @@ function Dashboard() {
               ...c,
               status: "OUT",
               touchedAt: Date.now(),
-              // conserva requested_at per analisi
               requested_at: c.requested_at || null,
             };
           })
         )
       );
-      const createdAt = current?.created_at ?? selectedCustomer?.created_at ?? null;
-      // usa la dayWindow del server, fallback a isToday per sicurezza
-      const eligibleOutToday = isWithinDayWindow(createdAt, dayWindow) || isToday(createdAt);
-      setOvernights((prev) => prev.filter((c) => c.customer_id !== customer_id));
+      const createdAt =
+        current?.created_at ?? selectedCustomer?.created_at ?? null;
 
-      bumpCountersOptimistic(current?.status ?? "IN", "OUT", eligibleOutToday);
+      // usa la dayWindow del server, fallback a isToday per sicurezza
+      const eligibleOutToday =
+        isWithinDayWindow(createdAt, dayWindow) || isToday(createdAt);
+
+      setOvernights((prev) =>
+        prev.filter((c) => c.customer_id !== customer_id)
+      );
+
+      bumpCountersOptimistic(
+        current?.status ?? "IN",
+        "OUT",
+        eligibleOutToday
+      );
+
     } else {
-      bumpCountersOptimistic(current?.status ?? "IN", status, isInTodayList(customer_id));
+      // PENDING, CARE, IN: solo counters ottimistici
+      bumpCountersOptimistic(
+        current?.status ?? "IN",
+        status,
+        isInTodayList(customer_id)
+      );
     }
+
     try {
-      // 🛰 2) CHIAMATA API (stesso endpoint che usi già)
+      // 🛰 2) CHIAMATA API
       const { data } = await api.post("update_customer_status.php", {
         customer_id,
         status,
-        company_id: companyIdNum,   // (ok per ora; quando avremo la versione _secure li toglieremo)
+        company_id: companyIdNum,   // TODO: quando passi alla versione _secure toglili
         location_id: locationIdNum,
         tag_number,
       });
 
       if (data.success) {
-        // ✅ 3) Allinea lo stato locale per tutti i casi (PENDING, CARE, IN inclusi)
+        // ✅ 3) Allinea SOLO il record (niente re-push in overnights qui)
         setCustomers((prev) =>
           customSort(
             prev.map((c) => {
               if (c.customer_id !== customer_id) return c;
 
-              const updated = {
-                ...c,
-                status,
-                touchedAt: Date.now(),
-              };
-
-              // regole timer/fields come prima
+              const updated = { ...c, status, touchedAt: Date.now() };
               if (status === "PENDING") {
                 updated.requested_at = new Date().toISOString();
               } else if (status === "CARE") {
@@ -985,25 +1022,12 @@ function Dashboard() {
               } else if (status === "OUT") {
                 updated.requested_at = c.requested_at || null;
               } else if (status === "OVERNIGHT") {
-                // di solito manteniamo requested_at (se esiste) o created_at guida il sort nella sezione overnight
                 updated.requested_at = (c.requested_at ?? c.created_at) ?? null;
               }
-
               return updated;
             })
           )
         );
-
-        // se è OVERNIGHT e non era già stato trattato in ottimistico (es. se in futuro togli l’ottimistico), aggiungilo
-        if (status === "OVERNIGHT") {
-          setOvernights((prev) => {
-            const updated = (customers ?? []).find((x) => x.customer_id === customer_id) || current || { customer_id, tag_number };            
-            const exists = prev.some((c) => c.customer_id === customer_id);
-            return exists
-              ? prev.map((c) => (c.customer_id === customer_id ? { ...updated, status: "OVERNIGHT" } : c))
-              : [{ ...updated, status: "OVERNIGHT" }, ...prev];
-          });
-        }
 
         showToast.success(
           status === "OVERNIGHT"
@@ -1012,16 +1036,15 @@ function Dashboard() {
             ? "Checkout completed"
             : `Status updated to ${status}`
         );
-        
-        // chiudi eventuale popup
+
         setSelectedCustomer(null);
-        refreshSoon(300);
+        refreshSoon(300, "status-updated");
       } else {
         // ❌ rollback
         showToast.error("Status update failed: " + (data.error || "Unknown error"));
         setCustomers(snapshotCustomers);
         setOvernights(snapshotOvernights);
-        refreshSoon(300);
+        refreshSoon(300, "rollback");
       }
     } catch (error) {
       console.error("🔥 Error updating status:", error);
@@ -1029,7 +1052,7 @@ function Dashboard() {
       // ❌ rollback
       setCustomers(snapshotCustomers);
       setOvernights(snapshotOvernights);
-      refreshSoon(300);
+      refreshSoon(300, "rollback");
     }
   };
 
